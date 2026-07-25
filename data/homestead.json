@@ -1,0 +1,536 @@
+{
+    "name":  "Broken Homestead",
+    "width":  128,
+    "height":  128,
+    "tile_size":  32,
+    "tree_generation":  {
+                            "seed":  17,
+                            "count":  240,
+                            "homestead_clear_radius":  650,
+                            "density_power":  3.5,
+                            "min_spacing":  38,
+                            "tree_width":  30,
+                            "tree_height":  38
+                        },
+    "buildings":  [
+                      {
+                          "id":  "house",
+                          "name":  "Ruined House"
+                      },
+                      {
+                          "id":  "workshop",
+                          "name":  "Ruined Workshop"
+                      }
+                  ],
+    "terrain":  [
+                    {
+                        "id":  "northern_mountains",
+                        "name":  "Forgotten Mountains",
+                        "kind":  "mountains",
+                        "display_color":  [
+                                              83,
+                                              86,
+                                              82
+                                          ],
+                        "blocks_movement":  true,
+                        "points":  [
+                                       [
+                                           0,
+                                           0
+                                       ],
+                                       [
+                                           128,
+                                           0
+                                       ],
+                                       [
+                                           128,
+                                           18
+                                       ],
+                                       [
+                                           110,
+                                           16
+                                       ],
+                                       [
+                                           96,
+                                           20
+                                       ],
+                                       [
+                                           80,
+                                           17
+                                       ],
+                                       [
+                                           64,
+                                           20
+                                       ],
+                                       [
+                                           48,
+                                           17
+                                       ],
+                                       [
+                                           32,
+                                           20
+                                       ],
+                                       [
+                                           16,
+                                           17
+                                       ],
+                                       [
+                                           0,
+                                           19
+                                       ]
+                                   ]
+                    },
+                    {
+                        "id":  "southern_ocean",
+                        "name":  "Remembering Sea",
+                        "kind":  "ocean",
+                        "display_color":  [
+                                              48,
+                                              88,
+                                              111
+                                          ],
+                        "blocks_movement":  true,
+                        "points":  [
+                                       [
+                                           0,
+                                           110
+                                       ],
+                                       [
+                                           16,
+                                           108
+                                       ],
+                                       [
+                                           32,
+                                           111
+                                       ],
+                                       [
+                                           48,
+                                           109
+                                       ],
+                                       [
+                                           64,
+                                           112
+                                       ],
+                                       [
+                                           80,
+                                           108
+                                       ],
+                                       [
+                                           96,
+                                           111
+                                       ],
+                                       [
+                                           112,
+                                           108
+                                       ],
+                                       [
+                                           128,
+                                           110
+                                       ],
+                                       [
+                                           128,
+                                           128
+                                       ],
+                                       [
+                                           0,
+                                           128
+                                       ]
+                                   ]
+                    },
+                    {
+                        "id":  "western_forest",
+                        "name":  "Unremembered Wood",
+                        "kind":  "dense_forest",
+                        "display_color":  [
+                                              37,
+                                              73,
+                                              43
+                                          ],
+                        "blocks_movement":  true,
+                        "points":  [
+                                       [
+                                           0,
+                                           18
+                                       ],
+                                       [
+                                           16,
+                                           18
+                                       ],
+                                       [
+                                           18,
+                                           34
+                                       ],
+                                       [
+                                           16,
+                                           50
+                                       ],
+                                       [
+                                           19,
+                                           66
+                                       ],
+                                       [
+                                           16,
+                                           82
+                                       ],
+                                       [
+                                           18,
+                                           98
+                                       ],
+                                       [
+                                           16,
+                                           110
+                                       ],
+                                       [
+                                           0,
+                                           112
+                                       ]
+                                   ]
+                    },
+                    {
+                        "id":  "eastern_river",
+                        "name":  "Whispering River",
+                        "kind":  "river",
+                        "display_color":  [
+                                              55,
+                                              104,
+                                              125
+                                          ],
+                        "blocks_movement":  true,
+                        "width":  3,
+                        "points":  [
+                                       [
+                                           124,
+                                           18
+                                       ],
+                                       [
+                                           121,
+                                           32
+                                       ],
+                                       [
+                                           125,
+                                           46
+                                       ],
+                                       [
+                                           120,
+                                           60
+                                       ],
+                                       [
+                                           124,
+                                           74
+                                       ],
+                                       [
+                                           120,
+                                           88
+                                       ],
+                                       [
+                                           124,
+                                           102
+                                       ],
+                                       [
+                                           122,
+                                           110
+                                       ]
+                                   ]
+                    },
+                    {
+                        "id":  "northwest_pond",
+                        "name":  "Reed Pond",
+                        "kind":  "pond",
+                        "display_color":  [
+                                              57,
+                                              105,
+                                              125
+                                          ],
+                        "blocks_movement":  false,
+                        "points":  [
+                                       [
+                                           35,
+                                           38
+                                       ],
+                                       [
+                                           39,
+                                           36
+                                       ],
+                                       [
+                                           43,
+                                           38
+                                       ],
+                                       [
+                                           44,
+                                           42
+                                       ],
+                                       [
+                                           41,
+                                           45
+                                       ],
+                                       [
+                                           36,
+                                           44
+                                       ],
+                                       [
+                                           34,
+                                           41
+                                       ]
+                                   ]
+                    },
+                    {
+                        "id":  "southeast_pond",
+                        "name":  "Still Pond",
+                        "kind":  "pond",
+                        "display_color":  [
+                                              57,
+                                              105,
+                                              125
+                                          ],
+                        "blocks_movement":  false,
+                        "points":  [
+                                       [
+                                           88,
+                                           86
+                                       ],
+                                       [
+                                           93,
+                                           84
+                                       ],
+                                       [
+                                           98,
+                                           87
+                                       ],
+                                       [
+                                           99,
+                                           91
+                                       ],
+                                       [
+                                           96,
+                                           94
+                                       ],
+                                       [
+                                           90,
+                                           94
+                                       ],
+                                       [
+                                           87,
+                                           90
+                                       ]
+                                   ]
+                    }
+                ],
+    "structures":  [
+                       {
+                           "id":  "bedroom",
+                           "building_id":  "house",
+                           "name":  "BEDROOM",
+                           "kind":  "room",
+                           "quality":  "ruined",
+                           "display_color":  [
+                                                 101,
+                                                 88,
+                                                 80
+                                             ],
+                           "x":  61,
+                           "y":  62,
+                           "width":  6,
+                           "height":  5,
+                           "blocks_movement":  true,
+                           "doors":  [
+                                         {
+                                             "side":  "right",
+                                             "offset":  2,
+                                             "width":  2,
+                                             "connects_to":  "common_room"
+                                         }
+                                     ]
+                       },
+                       {
+                           "id":  "kitchen_room",
+                           "building_id":  "house",
+                           "name":  "KITCHEN",
+                           "kind":  "room",
+                           "quality":  "damaged",
+                           "display_color":  [
+                                                 112,
+                                                 96,
+                                                 82
+                                             ],
+                           "x":  61,
+                           "y":  67,
+                           "width":  6,
+                           "height":  5,
+                           "blocks_movement":  true,
+                           "doors":  [
+                                         {
+                                             "side":  "right",
+                                             "offset":  2,
+                                             "width":  2,
+                                             "connects_to":  "common_room"
+                                         }
+                                     ]
+                       },
+                       {
+                           "id":  "common_room",
+                           "building_id":  "house",
+                           "name":  "COMMON ROOM",
+                           "kind":  "room",
+                           "quality":  "ruined",
+                           "display_color":  [
+                                                 106,
+                                                 92,
+                                                 82
+                                             ],
+                           "x":  67,
+                           "y":  62,
+                           "width":  6,
+                           "height":  10,
+                           "blocks_movement":  true,
+                           "doors":  [
+                                         {
+                                             "side":  "left",
+                                             "offset":  2,
+                                             "width":  2,
+                                             "connects_to":  "bedroom"
+                                         },
+                                         {
+                                             "side":  "left",
+                                             "offset":  7,
+                                             "width":  2,
+                                             "connects_to":  "kitchen_room"
+                                         },
+                                         {
+                                             "side":  "bottom",
+                                             "offset":  2,
+                                             "width":  2
+                                         }
+                                     ]
+                       },
+                       {
+                           "id":  "workshop",
+                           "building_id":  "workshop",
+                           "name":  "WORKSHOP",
+                           "kind":  "room",
+                           "quality":  "ruined",
+                           "display_color":  [
+                                                 96,
+                                                 89,
+                                                 78
+                                             ],
+                           "x":  52,
+                           "y":  63,
+                           "width":  7,
+                           "height":  6,
+                           "blocks_movement":  true,
+                           "doors":  [
+                                         {
+                                             "side":  "bottom",
+                                             "offset":  3,
+                                             "width":  2
+                                         }
+                                     ]
+                       }
+                   ],
+    "objects":  [
+                    {
+                        "id":  1,
+                        "type":  "bed",
+                        "x":  61,
+                        "y":  66,
+                        "orientation":  "E/W",
+                        "quality":  18
+                    },
+                    {
+                        "id":  2,
+                        "type":  "table",
+                        "x":  69,
+                        "y":  65,
+                        "orientation":  "E/W",
+                        "quality":  16
+                    },
+                    {
+                        "id":  3,
+                        "type":  "food_prep_station",
+                        "x":  62,
+                        "y":  70,
+                        "orientation":  "E/W",
+                        "quality":  34
+                    },
+                    {
+                        "id":  4,
+                        "type":  "workbench",
+                        "x":  53,
+                        "y":  65,
+                        "orientation":  "E/W",
+                        "quality":  19
+                    },
+                    {
+                        "id":  5,
+                        "type":  "tool_storage",
+                        "x":  57,
+                        "y":  65,
+                        "orientation":  "E/W",
+                        "quality":  38
+                    },
+                    {
+                        "id":  6,
+                        "type":  "stick",
+                        "x":  70,
+                        "y":  66,
+                        "orientation":  "E/W",
+                        "quality":  82
+                    },
+                    {
+                        "id":  7,
+                        "type":  "stone",
+                        "x":  71,
+                        "y":  68,
+                        "orientation":  "E/W",
+                        "quality":  91
+                    },
+                    {
+                        "id":  8,
+                        "type":  "grass",
+                        "x":  82,
+                        "y":  66,
+                        "orientation":  "E/W",
+                        "quality":  76
+                    },
+                    {
+                        "id":  9,
+                        "type":  "wild_grain",
+                        "x":  68,
+                        "y":  70,
+                        "orientation":  "E/W",
+                        "quality":  68
+                    },
+                    {
+                        "id":  10,
+                        "type":  "boulder",
+                        "x":  45,
+                        "y":  48,
+                        "orientation":  "E/W",
+                        "quality":  94
+                    },
+                    {
+                        "id":  11,
+                        "type":  "boulder",
+                        "x":  82,
+                        "y":  45,
+                        "orientation":  "E/W",
+                        "quality":  87
+                    },
+                    {
+                        "id":  12,
+                        "type":  "boulder",
+                        "x":  47,
+                        "y":  82,
+                        "orientation":  "E/W",
+                        "quality":  91
+                    },
+                    {
+                        "id":  13,
+                        "type":  "boulder",
+                        "x":  83,
+                        "y":  82,
+                        "orientation":  "E/W",
+                        "quality":  83
+                    }
+                ]
+}
