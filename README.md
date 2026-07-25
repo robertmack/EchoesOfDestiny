@@ -1,3 +1,6 @@
+# EchoesOfDestiny
+A simple game attempt
+
 # Remembering — Python Prototype v0.1
 
 A gray-box Python/Pygame version of the first-day prototype. The project deliberately uses plain shapes and text so the code focuses on reusable programming concepts rather than art assets.
