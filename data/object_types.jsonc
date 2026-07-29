@@ -1,0 +1,981 @@
+// ============================================================================
+// OBJECT DEFINITIONS
+// ============================================================================
+//
+// This file uses JSONC: ordinary JSON plus comments.
+//
+// LOADING RULES
+// ---------------------------------------------------------------------------
+// 1. Start with "_defaults" for every object.
+// 2. Apply the matching object definition as an override.
+// 3. Forms may override fields inherited from their parent object.
+// 4. If an object ID has no entry in "object_types", use "_defaults" and derive:
+//        id   = requested object ID
+//        name = title-cased object ID
+//        kind = "OBJECT"
+// 5. Arrays and nested objects are replaced unless the loader explicitly performs
+//    a deeper merge. "interactions" should be merged by interaction group.
+//
+// STANDARD OBJECT TEMPLATE
+// ---------------------------------------------------------------------------
+// {
+//     "id": "object_id",                 // required for listed definitions
+//     "name": "Display Name",            // optional; derived from id if omitted
+//     "kind": "OBJECT",                  // optional; default: "OBJECT"
+//
+//     "blocks_movement": false,           // optional; default: false
+//     "blocks_vision": false,             // optional; default: false
+//     "mobility": "fixed",                // optional; default: "fixed"
+//     "footprint": [1, 1],                // optional; [width, height] in tiles
+//
+//     "traits": [],                       // optional gameplay classifications
+//     "interactions": {},                 // optional interaction groups
+//
+//     "descriptions": {},                 // optional condition/form descriptions
+//     "state_fields": [],                 // optional per-instance state names
+//     "states": [],                       // optional named sprite/operating states
+//     "capacity": {},                     // optional resource/container capacity
+//     "nutrition": 0,                     // optional; hunger restored when edible
+//     "default_variant": "variant_id",    // optional
+//     "variants": [],                     // optional
+//     "forms": {},                        // optional persistent transformations
+//     "growth": {},                       // optional growth parameters
+//     "spawn_tiles": [],                  // optional world-generation restriction
+//     "spawn_influence": [],              // optional nearby-spawn influence
+//     "build_duration_seconds": 0.0,      // optional
+//     "build_cost": {}                    // optional
+// }
+//
+// SPRITE FILE NAMING
+// ---------------------------------------------------------------------------
+// Object sprites are discovered in src/assets/sprites/objects. Do not put
+// sprite paths or filenames in this catalog.
+//
+// Canonical filename:
+//   <object-type>[_<form>][_<variant>][_<state>][_f-<flavor>].png
+//
+// Rules:
+// - The first component is always the stable object type ID.
+// - Add only modifiers that apply to the rendered entity.
+// - Omit the default form and any missing/default modifier.
+// - Form precedes variant; state follows variant; flavor is always last.
+// - Flavor uses the literal "_f-" prefix and is cosmetic only.
+// - Resolution falls back toward the base object asset when a more-specific
+//   filename does not exist.
+// - Files that do not follow this convention are ignored by the game.
+// - Unrotated multi-tile artwork is authored in E/W orientation. N/S instances
+//   are rotated by the renderer.
+//
+// Examples:
+//   tree.png
+//   tree_stump.png
+//   tree_oak.png
+//   tree_stump_oak.png
+//   tree_stump_oak_burning.png
+//   tree_stump_oak_burning_f-hollow.png
+//
+// INTERACTION FORMAT
+// ---------------------------------------------------------------------------
+// "interactions": {
+//     "harvest": [
+//         {
+//             "id": "fell",                       // required within its group
+//             "label": "Chop Down Tree",          // optional; derived from id
+//             "availability": "condition_id",     // optional
+//             "requires": {
+//                 "item_trait": "chopping_item",
+//                 "carried_type": "object_id",
+//                 "player": {}
+//             },
+//             "duration_seconds": {
+//                 "base": 6.0,
+//                 "with_basket": 2.0
+//             },
+//             "cost": {},
+//             "water_cost": 0,
+//             "loot": {},                         // amount or inclusive [min, max]
+//             "creates": {},
+//             "result_form": "stump",
+//             "variants": []
+//         }
+//     ]
+// }
+//
+// Standard interaction groups currently used here:
+// pickup, sleep, eat, cook, craft, store, take, fill, pour, harvest, use
+//
+// ============================================================================
+{
+    "_schema_version": 1,
+    "_defaults": {
+        "name": null,
+        "kind": "OBJECT",
+        "blocks_movement": false,
+        "blocks_vision": false,
+        "mobility": "fixed",
+        "footprint": [
+            1,
+            1
+        ],
+        "traits": [],
+        "interactions": {}
+    },
+    "object_types": [
+        {
+            "id": "bed",
+            "name": "Bed",
+            "kind": "BED",
+            "descriptions": {
+                "ruined": "A collapsed bed frame.",
+                "damaged": "A battered bed offering rough rest.",
+                "worn": "A worn but serviceable bed.",
+                "good": "A sturdy, comfortable bed.",
+                "fine": "A finely kept bed promising deep rest."
+            },
+            "footprint": [
+                2,
+                1
+            ],
+            "blocks_movement": true,
+            "interactions": {
+                "sleep": [
+                    {
+                        "id": "sleep",
+                        "label": "Sleep"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "table",
+            "name": "Table",
+            "kind": "TABLE",
+            "descriptions": {
+                "ruined": "A splintered and collapsed table.",
+                "damaged": "A shaky table with a cracked surface.",
+                "worn": "A worn table where meals can be eaten.",
+                "good": "A solid table with a clean surface.",
+                "fine": "A finely made table fit for shared meals."
+            },
+            "footprint": [
+                2,
+                2
+            ],
+            "blocks_movement": true,
+            "interactions": {
+                "eat": [
+                    {
+                        "id": "eat_carried_food",
+                        "label": "Eat Porridge",
+                        "requires": {
+                            "carried_type": "porridge"
+                        },
+                        "consumes": {
+                            "type": "porridge"
+                        }
+                    },
+                    {
+                        "id": "eat_berries",
+                        "label": "Eat Berries",
+                        "requires": {
+                            "carried_type": "berry"
+                        },
+                        "consumes": {
+                            "type": "berry"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "food_prep_station",
+            "name": "Food Prep Station",
+            "kind": "FOOD_PREP_STATION",
+            "descriptions": {
+                "ruined": "A ruined food prep station unable to hold heat.",
+                "damaged": "A damaged food prep station for simple meals.",
+                "worn": "A smoke-darkened but dependable food prep station.",
+                "good": "A well-kept food prep station for careful cooking.",
+                "fine": "A fine food prep station with excellent tools."
+            },
+            "footprint": [
+                2,
+                1
+            ],
+            "blocks_movement": true,
+            "interactions": {
+                "cook": [
+                    {
+                        "id": "prepare_porridge",
+                        "label": "Prepare Porridge",
+                        "availability": "porridge_ingredients",
+                        "cost": {
+                            "grains": 3
+                        },
+                        "water_cost": 1,
+                        "creates": {
+                            "type": "porridge",
+                            "container": "player",
+                            "quality": 10
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "cupboard",
+            "name": "Cupboard",
+            "kind": "CUPBOARD",
+            "blocks_movement": true,
+            "footprint": [
+                1,
+                1
+            ],
+            "capacity": {
+                "food": 10
+            },
+            "build_cost": {
+                "wood": 4,
+                "fiber": 2
+            },
+            "descriptions": {
+                "ruined": "A crude cupboard with warped doors and wide gaps.",
+                "damaged": "A battered cupboard that offers uncertain shelter for food.",
+                "worn": "A plain wooden cupboard for keeping food together.",
+                "good": "A sturdy cupboard with close-fitting doors.",
+                "fine": "A finely joined cupboard that keeps provisions orderly."
+            },
+            "interactions": {
+                "store": [
+                    {
+                        "id": "store_food",
+                        "label": "Store Food",
+                        "availability": "cupboard_can_store_food"
+                    }
+                ],
+                "take": [
+                    {
+                        "id": "take_food",
+                        "label": "Take Food",
+                        "availability": "cupboard_has_food"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "workbench",
+            "name": "Workbench",
+            "kind": "WORKBENCH",
+            "descriptions": {
+                "ruined": "A collapsed workbench.",
+                "damaged": "A cracked bench suited to crude work.",
+                "worn": "A worn bench for ordinary crafting.",
+                "good": "A sturdy bench for crafting and repairs.",
+                "fine": "A precise, finely equipped workbench."
+            },
+            "footprint": [
+                4,
+                2
+            ],
+            "blocks_movement": true,
+            "interactions": {
+                "craft": [
+                    {
+                        "id": "craft_crude_hoe",
+                        "label": "Craft Crude Hoe",
+                        "requires": {
+                            "player": {
+                                "has_hoe": false
+                            }
+                        },
+                        "cost": {
+                            "branch": 1,
+                            "pebble": 1,
+                            "fiber": 1
+                        }
+                    },
+                    {
+                        "id": "craft_crude_axe",
+                        "label": "Craft Crude Axe",
+                        "requires": {
+                            "player": {
+                                "has_axe": false
+                            }
+                        },
+                        "cost": {
+                            "branch": 1,
+                            "pebble": 2,
+                            "fiber": 1
+                        },
+                        "creates": {
+                            "type": "axe",
+                            "container": "player"
+                        }
+                    },
+                    {
+                        "id": "craft_wooden_bucket",
+                        "label": "Craft Wooden Bucket",
+                        "requires": {
+                            "player": {
+                                "has_bucket": false
+                            }
+                        },
+                        "cost": {
+                            "wood": 2,
+                            "fiber": 1
+                        },
+                        "creates": {
+                            "type": "bucket",
+                            "container": "player"
+                        }
+                    },
+                    {
+                        "id": "weave_fiber_basket",
+                        "label": "Weave Fiber Basket",
+                        "requires": {
+                            "player": {
+                                "has_basket": false
+                            }
+                        },
+                        "cost": {
+                            "fiber": 3
+                        },
+                        "creates": {
+                            "type": "basket",
+                            "container": "player"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "bucket",
+            "name": "Wooden Bucket",
+            "kind": "BUCKET",
+            "state_fields": [
+                "water_uses"
+            ],
+            "descriptions": {
+                "ruined": "A broken wooden bucket that cannot hold water.",
+                "damaged": "A leaking wooden bucket bound with worn fibre.",
+                "worn": "A serviceable wooden bucket.",
+                "good": "A sturdy wooden bucket with tight joints.",
+                "fine": "A finely made wooden bucket that holds every drop."
+            },
+            "capacity": {
+                "water": {
+                    "ruined": 0,
+                    "damaged": 1,
+                    "worn": 4,
+                    "good": 5,
+                    "fine": 6
+                }
+            },
+            "interactions": {
+                "pickup": [
+                    {
+                        "id": "pick_up",
+                        "label": "Pick Up",
+                        "availability": "object_is_uncontained"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "basket",
+            "name": "Fiber Basket",
+            "kind": "BASKET",
+            "mobility": "portable",
+            "descriptions": {
+                "ruined": "A collapsed fiber basket that can barely carry anything.",
+                "damaged": "A frayed basket with several loose gaps.",
+                "worn": "A serviceable woven basket.",
+                "good": "A sturdy, tightly woven fiber basket.",
+                "fine": "A finely woven basket, light and beautifully balanced."
+            },
+            "interactions": {
+                "pickup": [
+                    {
+                        "id": "pick_up",
+                        "label": "Pick Up",
+                        "availability": "object_is_uncontained"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "tool_storage",
+            "name": "Tool Storage",
+            "kind": "TOOL_STORAGE",
+            "descriptions": {
+                "ruined": "Broken storage that leaves tools exposed.",
+                "damaged": "Damaged storage with few usable spaces.",
+                "worn": "Worn but functional tool storage.",
+                "good": "Organized storage that protects tools.",
+                "fine": "Fine fitted storage for valuable tools."
+            },
+            "footprint": [
+                2,
+                2
+            ],
+            "blocks_movement": true,
+            "persistence": {
+                "stored_tools": {
+                    "chance_per_count": 0.001,
+                    "decay_chance": 0.10,
+                    "modifier_range": [
+                        0.75,
+                        1.25
+                    ]
+                }
+            },
+            "interactions": {
+                "store": [
+                    {
+                        "id": "store_hoe",
+                        "label": "Store Hoe",
+                        "requires": {
+                            "player": {
+                                "has_hoe": true,
+                                "carrying_hoe": true
+                            }
+                        }
+                    },
+                    {
+                        "id": "store_axe",
+                        "label": "Store Axe",
+                        "requires": {
+                            "player": {
+                                "has_axe": true,
+                                "carrying_axe": true
+                            }
+                        }
+                    },
+                    {
+                        "id": "store_bucket",
+                        "label": "Store Bucket",
+                        "requires": {
+                            "player": {
+                                "has_bucket": true
+                            }
+                        }
+                    }
+                ],
+                "take": [
+                    {
+                        "id": "take_hoe",
+                        "label": "Take Hoe",
+                        "availability": "stored_hoe_available"
+                    },
+                    {
+                        "id": "take_axe",
+                        "label": "Take Axe",
+                        "availability": "stored_axe_available"
+                    },
+                    {
+                        "id": "take_bucket",
+                        "label": "Take Bucket",
+                        "availability": "stored_bucket_available"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "grass",
+            "name": "Tall Grass",
+            "kind": "GRASS",
+            "descriptions": {
+                "ruined": "Dead grass yielding almost no fiber.",
+                "damaged": "Sparse, damaged grass.",
+                "worn": "Ordinary tall grass providing fiber.",
+                "good": "Healthy tall grass with strong fibers.",
+                "fine": "Exceptionally long, supple grass."
+            },
+            "interactions": {
+                "harvest": [
+                    {
+                        "id": "gather",
+                        "label": "Gather",
+                        "loot": {
+                            "fiber": 1
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "porridge",
+            "name": "Porridge",
+            "mobility": "portable",
+            "traits": [
+                "edible"
+            ],
+            "nutrition": 30,
+            "descriptions": {
+                "ruined": "A miserable bowl of watery porridge, but it is edible.",
+                "damaged": "A thin, lumpy porridge with little appeal.",
+                "worn": "A plain bowl of sustaining grain porridge.",
+                "good": "A warm, carefully prepared grain porridge.",
+                "fine": "An unusually fine porridge with a smooth texture."
+            }
+        },
+        {
+            "id": "berry",
+            "name": "Berries",
+            "mobility": "portable",
+            "traits": [
+                "edible"
+            ],
+            "nutrition": 8,
+            "descriptions": {
+                "ruined": "Crushed and spoiled berries.",
+                "damaged": "Bruised berries that are still barely edible.",
+                "worn": "A small handful of ordinary wild berries.",
+                "good": "Fresh, ripe berries.",
+                "fine": "Exceptionally sweet and fragrant berries."
+            }
+        },
+        {
+            "id": "crop",
+            "name": {
+                "default": "Crop",
+                "corn": "Corn",
+                "wheat": "Wheat"
+            },
+            "kind": "CROP",
+            "default_variant": "wheat",
+            "state_fields": [
+                "age",
+                "growth_progress",
+                "water",
+                "health",
+                "fertilized",
+                "disease",
+                "tended"
+            ],
+            "growth": {
+                "base_minutes": 600.0,
+                "water_multiplier": 3.0,
+                "tended_multiplier": 1.15,
+                "initial_water_percentage": [
+                    1.0,
+                    15.0
+                ],
+                "initial_tended_percentage": [
+                    1.0,
+                    15.0
+                ],
+                "decay_per_growth_percent": {
+                    "water": [
+                        0.5,
+                        1.5
+                    ],
+                    "tended": [
+                        0.5,
+                        1.5
+                    ]
+                }
+            },
+            "variants": [
+                "corn",
+                "wheat"
+            ],
+            "forms": {
+                "seed": {
+                    "descriptions": {
+                        "ruined": "A dead seed that will never germinate.",
+                        "damaged": "A badly damaged seed with little chance of growth.",
+                        "worn": "An ordinary seed resting in the soil.",
+                        "good": "A healthy seed ready to germinate.",
+                        "fine": "An exceptional seed full of stored life."
+                    }
+                },
+                "sprout": {
+                    "descriptions": {
+                        "ruined": "A collapsed sprout fading into the soil.",
+                        "damaged": "A weak sprout struggling to survive.",
+                        "worn": "A small sprout beginning its growth.",
+                        "good": "A healthy sprout reaching toward the light.",
+                        "fine": "A vigorous sprout showing exceptional promise."
+                    }
+                },
+                "growing": {
+                    "descriptions": {
+                        "ruined": "A ruined young crop that has stopped growing.",
+                        "damaged": "A stunted crop with damaged leaves.",
+                        "worn": "A growing crop developing at an ordinary pace.",
+                        "good": "A healthy crop growing steadily.",
+                        "fine": "A flourishing crop growing with remarkable vigor."
+                    }
+                },
+                "mature": {
+                    "descriptions": {
+                        "ruined": "A ruined mature crop with nothing worth harvesting.",
+                        "damaged": "A damaged mature crop with a poor yield.",
+                        "worn": "A mature crop ready for an ordinary harvest.",
+                        "good": "A healthy mature crop ready for harvest.",
+                        "fine": "An exceptional mature crop heavy with its harvest."
+                    },
+                    "interactions": {
+                        "harvest": [
+                            {
+                                "id": "harvest",
+                                "label": "Harvest Wheat",
+                                "duration_seconds": {
+                                    "base": 6.0,
+                                    "with_basket": 2.0
+                                },
+                                "loot": {
+                                    "default": {
+                                        "food": 3
+                                    },
+                                    "wheat": {
+                                        "grains": [3, 5]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "dead": {
+                    "descriptions": {
+                        "ruined": "The remains of a crop have rotted into the soil.",
+                        "damaged": "A dead crop with brittle, broken stalks.",
+                        "worn": "A dead crop standing dry in the soil.",
+                        "good": "A recently dead crop whose structure remains intact.",
+                        "fine": "A well-preserved dead crop still holding useful material."
+                    }
+                }
+            }
+        },
+        {
+            "id": "pebble",
+            "name": "Pebble",
+            "kind": "PEBBLE",
+            "descriptions": {
+                "ruined": "A soft pebble flaking apart.",
+                "damaged": "A chipped and brittle pebble.",
+                "worn": "An ordinary weathered pebble.",
+                "good": "A hard, useful pebble.",
+                "fine": "A smooth pebble of excellent stone."
+            },
+            "interactions": {
+                "harvest": [
+                    {
+                        "id": "gather",
+                        "label": "Gather",
+                        "loot": {
+                            "pebble": 1
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "wild_plant",
+            "name": {
+                "default": "Wild Plant",
+                "wheat": "Wild Wheat"
+            },
+            "kind": "WILD_PLANT",
+            "default_variant": "wheat",
+            "variants": [
+                "wheat"
+            ],
+            "descriptions": {
+                "ruined": "Withered wheat bearing no seed.",
+                "damaged": "A sparse stand of damaged wheat.",
+                "worn": "A modest stand of wild wheat.",
+                "good": "Healthy wheat with ripe seed heads.",
+                "fine": "Tall golden wheat heavy with seed."
+            },
+            "interactions": {
+                "harvest": [
+                    {
+                        "id": "gather",
+                        "label": "Gather",
+                        "duration_seconds": {
+                            "base": 3.0,
+                            "with_basket": 1.0
+                        },
+                        "loot": {
+                            "seed": 1
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "branch",
+            "name": "Branch",
+            "kind": "BRANCH",
+            "descriptions": {
+                "ruined": "A rotten branch that breaks at a touch.",
+                "damaged": "A split branch with weak wood.",
+                "worn": "A weathered fallen branch.",
+                "good": "A strong fallen branch.",
+                "fine": "A straight branch ideal for crafting."
+            },
+            "interactions": {
+                "harvest": [
+                    {
+                        "id": "gather",
+                        "label": "Gather",
+                        "loot": {
+                            "branch": 1
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "tree",
+            "name": "Tree",
+            "kind": "TREE",
+            "blocks_movement": true,
+            "footprint": [
+                2,
+                2
+            ],
+            "forms": {
+                "standing": {
+                    "descriptions": {
+                        "ruined": "A dying tree with a hollow trunk.",
+                        "damaged": "A storm-damaged tree.",
+                        "worn": "A weathered tree beyond the homestead.",
+                        "good": "A healthy tree with a broad crown.",
+                        "fine": "A magnificent old tree in full vigor."
+                    },
+                    "spawn_influence": [
+                        {
+                            "type": "branch",
+                            "chance": 0.35,
+                            "distance": 5,
+                            "decay": 0.75
+                        }
+                    ],
+                    "interactions": {
+                        "harvest": [
+                            {
+                                "id": "break_off_branch",
+                                "label": "Break Off Branch",
+                                "availability": "tree_has_branch",
+                                "loot": {
+                                    "branch": 1
+                                }
+                            },
+                            {
+                                "id": "fell",
+                                "label": "Chop Down Tree",
+                                "loot": {
+                                    "wood": 3
+                                },
+                                "result_form": "stump",
+                                "requires": {
+                                    "item_trait": "chopping_item"
+                                }
+                            }
+                        ]
+                    }
+                },
+                "stump": {
+                    "name": "Stump",
+                    "persistence": {
+                        "object": {
+                            "chance_per_count": 0.001,
+                            "decay_chance": 0.10,
+                            "modifier_range": [
+                                0.75,
+                                1.25
+                            ]
+                        }
+                    },
+                    "descriptions": {
+                        "ruined": "A rotten stump collapsing into the earth.",
+                        "damaged": "A badly split stump with crumbling roots.",
+                        "worn": "A weathered stump left where a tree once stood.",
+                        "good": "A solid, freshly cut stump.",
+                        "fine": "A broad, sound stump with strong roots."
+                    }
+                }
+            }
+        },
+        {
+            "id": "boulder",
+            "name": "Boulder",
+            "kind": "BOULDER",
+            "descriptions": {
+                "ruined": "A boulder crumbling into grit.",
+                "damaged": "A fractured boulder shedding stone.",
+                "worn": "A weathered boulder surrounded by pebbles.",
+                "good": "A solid boulder with useful stone.",
+                "fine": "A massive boulder of sound stone."
+            },
+            "footprint": [
+                2,
+                2
+            ],
+            "blocks_movement": true,
+            "spawn_influence": [
+                {
+                    "type": "pebble",
+                    "chance": 0.18,
+                    "distance": 2,
+                    "decay": 1.0
+                }
+            ]
+        },
+        {
+            "id": "bush",
+            "name": {
+                "default": "Bush",
+                "berry": "Berry Bush"
+            },
+            "kind": "BUSH",
+            "default_variant": "berry",
+            "variants": [
+                "berry"
+            ],
+            "descriptions": {
+                "ruined": "A dead thorny bush with no fruit.",
+                "damaged": "A struggling bush bearing a few shriveled berries.",
+                "worn": "A weathered berry bush with a modest crop.",
+                "good": "A healthy bush laden with ripe berries.",
+                "fine": "A flourishing berry bush heavy with exceptional fruit."
+            },
+            "spawn_tiles": [
+                "grassland"
+            ],
+            "interactions": {
+                "harvest": [
+                    {
+                        "id": "harvest",
+                        "label": "Harvest Berries",
+                        "variants": [
+                            "berry"
+                        ],
+                        "duration_seconds": {
+                            "base": 3.0,
+                            "with_basket": 1.0
+                        },
+                        "creates": {
+                            "type": "berry",
+                            "quantity": 1,
+                            "container": "player"
+                        }
+                    },
+                    {
+                        "id": "uproot",
+                        "label": "Pull Berry Bush",
+                        "variants": [
+                            "berry"
+                        ],
+                        "loot": {
+                            "fiber": 1,
+                            "branch": 1
+                        },
+                        "creates": {
+                            "type": "berry",
+                            "quantity": 1,
+                            "container": "player"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "barrel",
+            "name": "Wooden Barrel",
+            "kind": "BARREL",
+            // `water_uses` is stored instance data. `empty` is a named state
+            // selected when that value reaches zero.
+            "state_fields": [
+                "water_uses"
+            ],
+            "states": [
+                "full",
+                "empty"
+            ],
+            "persistence": {
+                "object": {
+                    "chance_per_count": 0.001,
+                    "decay_chance": 0.10,
+                    "modifier_range": [
+                        0.75,
+                        1.25
+                    ]
+                },
+                "water_level": {
+                    "chance_per_count": 0.001,
+                    "decay_chance": 0.10,
+                    "modifier_range": [
+                        0.75,
+                        1.25
+                    ]
+                }
+            },
+            "descriptions": {
+                "ruined": "A crude, leaking barrel bound with rough fibre.",
+                "damaged": "A weathered barrel that still holds water.",
+                "worn": "A serviceable wooden water barrel.",
+                "good": "A tightly made barrel with sound staves.",
+                "fine": "A finely coopered barrel that wastes no water."
+            },
+            "blocks_movement": true,
+            "capacity": {
+                "water": 30
+            },
+            "build_duration_seconds": 4.0,
+            "build_cost": {
+                "wood": 5,
+                "fiber": 2
+            },
+            "interactions": {
+                "fill": [
+                    {
+                        "id": "fill_barrel",
+                        "label": "Fill Barrel",
+                        "availability": "barrel_can_fill"
+                    },
+                    {
+                        "id": "fill_bucket_from_barrel",
+                        "label": "Fill Bucket From Barrel",
+                        "availability": "barrel_can_fill_bucket"
+                    }
+                ],
+                "pour": [
+                    {
+                        "id": "pour_water_into_barrel",
+                        "label": "Pour Water Into Barrel",
+                        "availability": "barrel_can_receive_bucket"
+                    }
+                ]
+            }
+        },
+        {
+            "id": "axe",
+            "name": "Crude Axe",
+            "kind": "AXE",
+            "traits": [
+                "chopping_item"
+            ],
+            "descriptions": {
+                "ruined": "A broken axe with a useless edge.",
+                "damaged": "A badly damaged axe that struggles to bite into wood.",
+                "worn": "A crude, worn axe suitable for chopping.",
+                "good": "A sturdy axe with a dependable edge.",
+                "fine": "A finely balanced axe with a keen edge."
+            },
+            "interactions": {
+                "pickup": [
+                    {
+                        "id": "pick_up",
+                        "label": "Pick Up",
+                        "availability": "object_is_uncontained"
+                    }
+                ]
+            },
+            "mobility": "portable"
+        }
+    ]
+}

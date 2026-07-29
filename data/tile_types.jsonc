@@ -1,0 +1,99 @@
+// Static tile definitions, spawning rules, and tile-specific progression.
+{
+  "seed": 4817,
+  "tile_types": {
+    "wooden_floor": {
+      "spawn_chances": {}
+    },
+    "dirt": {
+      "spawn_chances": {}
+    },
+    "soil": {
+      "spawn_chances": {}
+    },
+    "grassland": {
+      "spawn_chances": {
+        "pebble": 0.05,
+        "wild_plant": 0.04,
+        "branch": 0.05,
+        "bush": 0.02,
+        "grass": 0.10
+      },
+      "tilling": {
+        "result": "soil",
+        "tracked_fields": [
+          "till_percentage",
+          "tilled_today",
+          "soil_persistence_percentage",
+          "kind_override",
+          "persistence_modifier"
+        ],
+        "progress_per_till": 5.0,
+        "persistence_gain_per_conversion": 2.0,
+        "reverted_till_progress_range": [
+          90.0,
+          99.0
+        ],
+        "persistence_modifier_range": [
+          0.75,
+          1.25
+        ]
+      }
+    },
+    "shallow_water": {
+      "spawn_chances": {},
+      "spawn_influence": [
+        {
+          "type": "grass",
+          "chance": 0.05,
+          "distance": 1,
+          "decay": 1.0
+        }
+      ]
+    },
+    "desert": {
+      "spawn_chances": {}
+    },
+    "hills": {
+      "spawn_chances": {
+        "pebble": 0.12,
+        "wild_plant": 0.02,
+        "branch": 0.0
+      }
+    },
+    "pond": {
+      "spawn_chances": {},
+      "spawn_influence": [
+        {
+          "type": "bush",
+          "chance": 0.10,
+          "distance": 2,
+          "decay": 0.5
+        },
+        {
+          "type": "grass",
+          "chance": 0.05,
+          "distance": 1,
+          "decay": 1.0
+        }
+      ]
+    },
+    "mountain": {
+      "spawn_chances": {}
+    },
+    "deep_water": {
+      "spawn_chances": {},
+      "spawn_influence": [
+        {
+          "type": "grass",
+          "chance": 0.05,
+          "distance": 1,
+          "decay": 1.0
+        }
+      ]
+    },
+    "chasm": {
+      "spawn_chances": {}
+    }
+  }
+}

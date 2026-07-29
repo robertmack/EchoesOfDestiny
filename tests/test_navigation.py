@@ -56,7 +56,7 @@ def test_large_object_routes_to_reachable_interaction_tile() -> None:
     path = game.build_navigation_path_to_object(bed)
 
     assert path
-    assert distance_to_object(path[-1], bed) <= INTERACTION_DISTANCE
+    assert distance_to_object(path[-1], bed) <= game.interaction_distance
     assert game.can_stand_at(*path[-1])
 
 
@@ -120,3 +120,33 @@ def test_diagonal_path_cannot_cut_across_blocked_corner() -> None:
     path = find_tile_path((16, 16), (48, 48), tile_map)
 
     assert path == [(16.0, 16.0), (16.0, 48.0), (48.0, 48.0)]
+
+
+def test_player_interpolates_between_tile_centers() -> None:
+    from remembering.game import Game
+
+    game = Game(fullscreen=False)
+    start = (game.player.x, game.player.y)
+    start_column, start_row, _ = game.map.tile_map.tile_at_world(*start)
+    destination = next(
+        game.map.tile_map.tile_center(column, row)
+        for column, row in (
+            (start_column + 1, start_row),
+            (start_column - 1, start_row),
+            (start_column, start_row + 1),
+            (start_column, start_row - 1),
+        )
+        if game.can_stand_at(*game.map.tile_map.tile_center(column, row))
+        and game.build_navigation_path(
+            game.map.tile_map.tile_center(column, row)
+        )
+    )
+    game.navigation_path = [destination]
+    game.walk_target = destination
+    game.player.speed = 32
+
+    game.move_along_path(0.25)
+
+    assert math.dist(start, (game.player.x, game.player.y)) == 8
+    assert (game.player.x, game.player.y) != destination
+    assert not game.map.tile_map.is_tile_center(game.player.x, game.player.y)

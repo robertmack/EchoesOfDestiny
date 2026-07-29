@@ -10,8 +10,15 @@ from pathlib import Path
 import pygame
 
 from remembering.camera import Camera
+from remembering.coordinates import (
+    bounds_as_position_data,
+    bounds_from_position_data,
+    mapxy_as_position_data,
+    position_from_data,
+)
 from remembering.navigation import find_tile_path, find_tile_path_to_any
 from remembering.model import (
+    BuildMemory,
     DAY_LENGTH_MINUTES,
     START_OF_DAY_MINUTES,
     DayState,
@@ -29,12 +36,8 @@ from remembering.model import (
 )
 from remembering.rules import (
     available_actions,
-    can_craft_axe,
-    can_craft_basket,
-    can_craft_bucket,
-    can_craft_hoe,
-    has_new_craftable_tool,
 )
+from remembering.sprites import ObjectSpriteCatalog
 from remembering.tiles import Tile, TileEdge, TileKind
 from remembering.world import (
     DEFAULT_CURRENT_LEVEL_PATH,
@@ -42,7 +45,10 @@ from remembering.world import (
     initialize_current_level_from_map,
     MapLoadError,
     ObjectPersistenceError,
+    load_memory_file,
     load_map,
+    memory_file_path,
+    save_memory_file,
     save_persistent_objects,
     sync_current_level_from_map,
     rebuild_tile_map,
@@ -61,44 +67,54 @@ def build_context_menu_options(
     return options
 
 
-WORKBENCH_RECIPES = (
-    ("Craft Crude Hoe", can_craft_hoe),
-    ("Craft Crude Axe", can_craft_axe),
-    ("Craft Wooden Bucket", can_craft_bucket),
-    ("Weave Fiber Basket", can_craft_basket),
-)
-DISABLED_RECIPE_OPTIONS = {
-    action: f"{action} (materials required)" for action, _ in WORKBENCH_RECIPES
-}
+DISABLED_INTERACTION_SUFFIX = " (requirements not met)"
 
 
 def object_action_menu_options(obj: WorldObject, player: PlayerState) -> list[str]:
     if obj.kind is not ObjectKind.WORKBENCH:
         return available_actions(obj, player)
+    available = set(available_actions(obj, player))
     return [
-        action if can_craft(player) else DISABLED_RECIPE_OPTIONS[action]
-        for action, can_craft in WORKBENCH_RECIPES
+        action if action in available else f"{action}{DISABLED_INTERACTION_SUFFIX}"
+        for action in obj.interactions
     ]
 
 
 def action_option_enabled(option: str) -> bool:
-    return option != EMPTY_BUCKET_REQUIRED and option not in DISABLED_RECIPE_OPTIONS.values()
+    return option not in {EMPTY_BUCKET_REQUIRED, RUINED_BUCKET_REQUIRED} and not option.endswith(
+        DISABLED_INTERACTION_SUFFIX
+    )
 
 
 def build_ground_context_menu_options(
-    tile: Tile, player: PlayerState, state: LevelTileState | None = None
+    tile: Tile,
+    player: PlayerState,
+    state: LevelTileState | None = None,
+    crop: WorldObject | None = None,
 ) -> list[str]:
     options = ["Move To"]
+    if player.has_bucket:
+        options.append("Drop Bucket")
     if tile.kind in {TileKind.SHALLOW_WATER, TileKind.POND}:
-        options.append(
-            "Gather Water"
-            if player.has_bucket and not player.bucket_filled
-            else EMPTY_BUCKET_REQUIRED
-        )
-    if tile.kind is TileKind.SOIL and state is not None and state.crop is not None:
-        if player.has_bucket and player.bucket_filled and not state.watered:
+        if player.bucket is not None and int(player.bucket.capacity.get("water", 0)) <= 0:
+            options.append(RUINED_BUCKET_REQUIRED)
+        else:
+            options.append(
+                "Gather Water"
+                if player.has_bucket and not player.bucket_filled
+                else EMPTY_BUCKET_REQUIRED
+            )
+    crop_state = crop.state if crop is not None else {}
+    if tile.kind is TileKind.SOIL and crop is not None:
+        if (
+            player.has_bucket
+            and player.bucket_filled
+            and float(crop_state.get("water", 0.0)) < 100.0
+        ):
             options.append("Water Crop")
-        if not state.tended and state.crop_growth < 1.0:
+        if float(crop_state.get("tended", 0.0)) < 100.0 and float(
+            crop_state.get("growth_progress", 0.0)
+        ) < 1.0:
             options.append("Tend Plant")
     return options
 
@@ -127,9 +143,133 @@ def wrap_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
 
 
 def object_map_label(obj: WorldObject) -> str:
-    if obj.kind is ObjectKind.TREE and tree_state_data(obj.state)["form"] == "stump":
-        return "Stump"
-    return obj.kind.name.lower().replace("_", " ").title()
+    return obj.name
+
+
+def crop_inspection_lines(obj: WorldObject) -> list[str]:
+    if obj.type_id != "crop":
+        return []
+    return [
+        f"Growth: {float(obj.state.get('growth_progress', 0.0)) * 100:.1f}%",
+        f"Water: {float(obj.state.get('water', 0.0)):.1f}%",
+        f"Tended: {float(obj.state.get('tended', 0.0)):.1f}%",
+    ]
+
+
+def routine_step_editable_fields(step: RoutineStep) -> tuple[str, ...]:
+    """Return fields meaningful to this command, plus any populated extras."""
+    fields = ["action"]
+    area_commands = {
+        *AREA_COMMAND_TYPES,
+        "Chop Trees",
+        "Till Grassland",
+        "Plant Wheat",
+        "Water Crops",
+        "Tend Crops",
+        "Harvest Wheat",
+        "Build Barrel",
+        "Build Cupboard",
+    }
+    if step.action in area_commands:
+        fields.extend(("area_bounds", "quantity", "target_areas"))
+    elif step.action == "Fill Barrel":
+        fields.extend(
+            (
+                "target_id",
+                "target_type",
+                "target_point",
+                "area_bounds",
+                "source_areas",
+                "target_build_memory",
+            )
+        )
+    elif step.action == "Move To":
+        fields.append("target_point")
+    else:
+        fields.extend(("target_id", "target_type", "target_point"))
+
+    if step.action in AREA_COMMAND_TYPES:
+        fields.append("nearest_to_player")
+    if step.action == "Water Crops":
+        fields.extend(("secondary_bounds", "source_areas"))
+    if step.action == "Till Grassland":
+        fields.extend(("max_game_minutes", "till_until_done"))
+
+    # Never hide data already carried by a command, even when it came from an
+    # older schema or a hand-edited memory file.
+    for field_name in RoutineStep.__dataclass_fields__:
+        if field_name == "action":
+            continue
+        value = getattr(step, field_name)
+        populated = value is not None and value is not False
+        if populated and field_name not in fields:
+            fields.append(field_name)
+    return tuple(fields)
+
+
+def routine_field_editor_value(step: RoutineStep, field_name: str) -> object:
+    value = getattr(step, field_name)
+    if value is None:
+        return None
+    if field_name == "target_point":
+        return mapxy_as_position_data(value)
+    if field_name in {"area_bounds", "secondary_bounds"}:
+        return bounds_as_position_data(value)
+    if field_name in {"source_areas", "target_areas"}:
+        return [bounds_as_position_data(area) for area in value]
+    return value
+
+
+def routine_field_runtime_value(field_name: str, value: object) -> object:
+    if value is None:
+        return None
+    if field_name == "target_point":
+        return position_from_data(value).mapxy
+    if field_name in {"area_bounds", "secondary_bounds"}:
+        return bounds_from_position_data(value)
+    if field_name in {"source_areas", "target_areas"}:
+        if not isinstance(value, list):
+            raise ValueError(f"{field_name} requires an array of bounds")
+        return tuple(bounds_from_position_data(area) for area in value)
+    return value
+
+
+def sprite_size_within_footprint(
+    sprite_size: tuple[int, int], footprint_size: tuple[int, int]
+) -> tuple[int, int]:
+    """Keep small sprites native-sized and proportionally shrink oversized ones."""
+    sprite_width, sprite_height = sprite_size
+    footprint_width, footprint_height = footprint_size
+    scale = min(
+        1.0,
+        footprint_width / sprite_width,
+        footprint_height / sprite_height,
+    )
+    return (
+        max(1, round(sprite_width * scale)),
+        max(1, round(sprite_height * scale)),
+    )
+
+
+def random_within_tile_anchor(
+    object_id: int,
+    type_id: str,
+    sprite_size: tuple[int, int],
+    footprint_size: tuple[int, int],
+    margin: float = 0.2,
+) -> tuple[float, float]:
+    """Place the whole sprite inside a stable per-instance exclusion margin."""
+    randomizer = random.Random(f"remembering:{type_id}:{object_id}")
+    sprite_width, sprite_height = sprite_size
+    footprint_width, footprint_height = footprint_size
+    left = margin + sprite_width / footprint_width / 2.0
+    right = 1.0 - margin - sprite_width / footprint_width / 2.0
+    top = margin + sprite_height / footprint_height / 2.0
+    bottom = 1.0 - margin - sprite_height / footprint_height / 2.0
+    return (
+        left + randomizer.random() * max(0.0, right - left),
+        top + randomizer.random() * max(0.0, bottom - top),
+    )
 
 
 def distance_to_object(point: tuple[float, float], obj: WorldObject) -> float:
@@ -162,48 +302,53 @@ def build_path_points(start: tuple[float, float], end: tuple[float, float], step
         points.append((int(x), int(y)))
     return points
 
-WIDTH, HEIGHT = 1100, 720
+WIDTH, HEIGHT = 1050, 686
 TOP_BAR_HEIGHT = 46
 SIDEBAR_WIDTH = 190
 RIGHT_SIDEBAR_WIDTH = 220
 PLAYER_RADIUS = 14
 INTERACTION_DISTANCE = 45
 GAME_MINUTES_PER_REAL_SECOND = 1.0
+FIXED_SIMULATION_TICK_SECONDS = 0.05
 DAY_FADE_DURATION_SECONDS = 0.75
-CROP_BASE_GROWTH_MINUTES = 600.0
-CROP_WATERED_MULTIPLIER = 3.0
-CROP_TENDED_MULTIPLIER = 1.15
 EMPTY_BUCKET_REQUIRED = "Gather Water (empty bucket required)"
-BUCKET_CAPACITY = 5
-BARREL_CAPACITY = 30
-TIME_SPEED_OPTIONS = ((".5x", 0.5), ("1x", 1.0), ("2x", 2.0), ("4x", 4.0), ("10x", 10.0))
+RUINED_BUCKET_REQUIRED = "Gather Water (bucket is ruined)"
+TIME_SPEED_OPTIONS = (
+    (".5x", 0.5),
+    ("1x", 1.0),
+    ("2x", 2.0),
+    ("4x", 4.0),
+    ("10x", 10.0),
+    ("20x", 20.0),
+    ("40x", 40.0),
+)
 AREA_COMMAND_TYPES = {
     "Gather Pebbles": {"pebble"},
     "Gather Branches": {"branch"},
-    "Gather Seeds": {"wheat", "wild_grain"},
+    "Gather Seeds": {"wild_plant"},
     "Gather Tall Grass": {"grass"},
 }
 AREA_COMMANDS = list(AREA_COMMAND_TYPES)
+BUILD_COMMAND_TYPES = {
+    "Build Barrel": "barrel",
+    "Build Cupboard": "cupboard",
+}
 AREA_COMMAND_CATEGORIES = ("Gather", "Farm", "Build")
 MAP_LEFT = SIDEBAR_WIDTH
-MAP_RIGHT = WIDTH - RIGHT_SIDEBAR_WIDTH
+MAP_RIGHT = MAP_LEFT + 640
 MAP_TOP = TOP_BAR_HEIGHT
-MAP_BOTTOM = HEIGHT
+MAP_BOTTOM = MAP_TOP + 640
 RELOAD_BUTTON = pygame.Rect(WIDTH - RIGHT_SIDEBAR_WIDTH + 12, HEIGHT - 46, RIGHT_SIDEBAR_WIDTH - 24, 32)
 MAP_VIEWPORT = pygame.Rect(MAP_LEFT, MAP_TOP, MAP_RIGHT - MAP_LEFT, MAP_BOTTOM - MAP_TOP)
 
 
-def tilling_duration_seconds(hoe_quality: int) -> float:
-    quality = max(1, min(100, hoe_quality))
-    return 6.0 + (100 - quality) * 0.18
+def tilling_duration_seconds(_hoe_quality: int) -> float:
+    """Fixed until skills and equipment provide authored work-rate modifiers."""
+    return 15.0
 
 
 def planting_duration_seconds(has_basket: bool) -> float:
     return 1.5 if has_basket else 4.0
-
-
-def harvesting_duration_seconds(has_basket: bool) -> float:
-    return 2.0 if has_basket else 6.0
 
 
 def sun_track_position(progress: float, track_x: int, track_width: int, radius: int = 8) -> int:
@@ -212,11 +357,11 @@ def sun_track_position(progress: float, track_x: int, track_width: int, radius: 
 
 
 def object_job_duration_seconds(action: str, obj: WorldObject, has_basket: bool) -> float:
-    if action == "Harvest Wheat":
-        return harvesting_duration_seconds(has_basket)
-    if action == "Harvest Berries" or (action == "Gather" and obj.kind is ObjectKind.WILD_GRAIN):
-        return 1.0 if has_basket else 3.0
-    return 0.55
+    duration = obj.interactions.get(action, {}).get("duration_seconds", {})
+    if not isinstance(duration, dict):
+        return float(duration)
+    key = "with_basket" if has_basket and "with_basket" in duration else "base"
+    return float(duration.get(key, 0.55))
 
 
 @dataclass(slots=True)
@@ -234,6 +379,7 @@ class AreaTarget:
     target_id: int | None = None
     prerequisite_target_ids: tuple[int, ...] = ()
     placement_point: tuple[float, float] | None = None
+    work_fraction: float = 1.0
 
 
 @dataclass(slots=True)
@@ -265,6 +411,7 @@ def available_area_commands(player: PlayerState) -> list[str]:
         commands.append("Water Crops")
     commands.append("Tend Crops")
     commands.append("Build Barrel")
+    commands.append("Build Cupboard")
     commands.append("Harvest Wheat")
     return commands
 
@@ -284,7 +431,7 @@ def area_commands_for_category(player: PlayerState, category: str) -> list[str]:
             if command in {"Till Grassland", "Plant Wheat", "Water Crops", "Tend Crops", "Harvest Wheat"}
         ]
     if category == "Build":
-        return [command for command in commands if command == "Build Barrel"]
+        return [command for command in commands if command in BUILD_COMMAND_TYPES]
     return []
 
 
@@ -306,6 +453,7 @@ class Game:
         self.font = pygame.font.Font(None, 25)
         self.small_font = pygame.font.Font(None, 20)
         self.title_font = pygame.font.Font(None, 42)
+        self.object_sprites = ObjectSpriteCatalog()
         self.day = DayState(mode=Mode.DIRECT)
         self.persistence_path = persistence_path
         initialize_current_level_from_map(current_level_path=self.persistence_path)
@@ -314,11 +462,29 @@ class Game:
             day_number=self.day.number,
             reset_for_morning=True,
         )
+        self.day.remembered_routine = list(self.map.remembered_routine)
         self.objects = self.map.objects
+        self.build_memories = self.map.build_memories
+        self.sync_all_barrel_sprite_states()
+        self.world_scale = self.map.tile_map.tile_size / 32.0
+        self.player_radius = PLAYER_RADIUS * self.world_scale
+        self.interaction_distance = INTERACTION_DISTANCE * self.world_scale
         spawn_x, spawn_y = self.player_spawn()
         self.player = PlayerState(x=spawn_x, y=spawn_y)
+        self.player.speed *= self.world_scale
+        self.player.carried_objects = [
+            obj for obj in self.objects.values() if obj.container == "player"
+        ]
         self.storage_memories = self.load_storage_memories()
-        self.camera = Camera(MAP_LEFT, MAP_TOP, MAP_RIGHT - MAP_LEFT, MAP_BOTTOM - MAP_TOP)
+        self.camera = Camera(
+            MAP_LEFT,
+            MAP_TOP,
+            MAP_RIGHT - MAP_LEFT,
+            MAP_BOTTOM - MAP_TOP,
+            zoom=64 / self.map.tile_map.tile_size,
+            min_zoom=16 / self.map.tile_map.tile_size,
+            max_zoom=1.0,
+        )
         self.camera.center_on(self.object_of_type("bed").center, (self.map.width, self.map.height))
         self.last_camera_follow_position = (self.player.x, self.player.y)
         self.selected_id: int | None = None
@@ -330,6 +496,9 @@ class Game:
         self.active_command_category: str | None = None
         self.area_quantity_buttons: list[tuple[pygame.Rect, int]] = []
         self.area_command_quantity = 10
+        self.till_time_buttons: list[tuple[pygame.Rect, str]] = []
+        self.till_max_game_minutes = 60
+        self.till_until_done = False
         self.active_command: str | None = None
         self.command_drag_start: tuple[int, int] | None = None
         self.command_drag_current: tuple[int, int] | None = None
@@ -343,6 +512,7 @@ class Game:
         self.pending_source_areas: list[tuple[int, int, int, int]] = []
         self.pending_target_areas: list[tuple[int, int, int, int]] = []
         self.pending_empty_area_memory = False
+        self.pending_failed_memory_thought = "Why did I come here?"
         self.thought_bubble_text: str | None = None
         self.thought_bubble_timer = 0.0
         self.walk_target: tuple[float, float] | None = None
@@ -361,6 +531,7 @@ class Game:
         self.job_timer = 0.0
         self.job_duration = 0.55
         self.time_accumulator = 0.0
+        self.simulation_step_accumulator = 0.0
         self.time_speed = 1.0
         self.simulation_paused = False
         self.pause_button = pygame.Rect(0, 0, 0, 0)
@@ -369,10 +540,17 @@ class Game:
         self.day_transition_progress = 0.0
         self.replay_outcome = "expand"
         self.record_routine_commands = True
+        self.auto_cheat_memory = False
         self.adjusting_memory = False
         self.memory_edit_index = 0
         self.memory_editor_rows: list[tuple[pygame.Rect, int]] = []
         self.memory_editor_buttons: list[tuple[pygame.Rect, str]] = []
+        self.memory_editor_fields: list[tuple[pygame.Rect, str]] = []
+        self.memory_file_name_rect = pygame.Rect(0, 0, 0, 0)
+        self.memory_file_name = "homestead"
+        self.memory_edit_field: str | None = None
+        self.memory_edit_buffer = ""
+        self.memory_editor_previous_pause = False
 
     def run(self) -> None:
         while self.running:
@@ -435,13 +613,31 @@ class Game:
                 }
                 action_index = number_keys.get(event.key)
 
-                if event.key == pygame.K_F5:
+                if self.adjusting_memory:
+                    self.handle_memory_editor_key(
+                        event.key, pygame.key.get_mods(), event.unicode
+                    )
+                elif event.key == pygame.K_c:
+                    self.open_memory_editor()
+                elif event.key == pygame.K_F5:
                     self.reload_map()
+                elif event.key == pygame.K_F6:
+                    self.reload_sprites()
+                elif event.key == pygame.K_a:
+                    self.start_auto_cheat_memory()
+                elif event.key == pygame.K_ESCAPE and self.auto_cheat_memory:
+                    self.stop_auto_cheat_memory()
+                elif (
+                    event.key == pygame.K_p
+                    and self.day.mode is not Mode.MORNING
+                ):
+                    self.simulation_paused = not self.simulation_paused
+                    self.log("Paused." if self.simulation_paused else "Playing.")
                 elif event.key == pygame.K_w:
                     self.player.inventory["wood"] += 1
                 elif event.key == pygame.K_b:
-                    self.player.has_bucket = True
-                    self.player.bucket_water_uses = 0
+                    if not self.player.has_bucket:
+                        self.create_carried_object("bucket")
                 elif self.context_menu_options:
                     if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
                         self.context_menu_options = []
@@ -457,16 +653,15 @@ class Game:
                 elif event.key == pygame.K_q and pygame.key.get_mods() & pygame.KMOD_CTRL:
                     self.running = False
                 elif self.day.mode is Mode.MORNING:
-                    if self.adjusting_memory:
-                        self.handle_memory_editor_key(event.key, pygame.key.get_mods())
-                    else:
-                        self.handle_morning_key(event.key)
+                    self.handle_morning_key(event.key)
                 elif self.day.mode is Mode.DIRECT and self.selected_id and action_index is not None:
                     self.activate_sidebar_action(action_index)
                 elif self.day.mode is Mode.DIRECT and action_index is not None:
                     self.activate_area_menu_index(action_index)
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 2 and MAP_VIEWPORT.collidepoint(event.pos):
+                if self.adjusting_memory and event.button == 1:
+                    self.handle_memory_editor_click(event.pos)
+                elif event.button == 2 and MAP_VIEWPORT.collidepoint(event.pos):
                     self.camera_dragging = True
                     self.camera_drag_position = event.pos
                 elif event.button == 1 and self.pause_button.collidepoint(event.pos):
@@ -494,14 +689,19 @@ class Game:
                 elif event.button == 1 and RELOAD_BUTTON.collidepoint(event.pos):
                     self.reload_map()
                 elif self.day.mode is Mode.MORNING:
-                    if self.adjusting_memory:
-                        self.handle_memory_editor_click(event.pos)
-                    else:
-                        self.handle_morning_click(event.pos)
+                    self.handle_morning_click(event.pos)
                 elif self.day.mode is Mode.DIRECT:
                     if event.button == 1:
                         quantity_change = next(
                             (change for rect, change in self.area_quantity_buttons if rect.collidepoint(event.pos)),
+                            None,
+                        )
+                        till_time_action = next(
+                            (
+                                action
+                                for rect, action in self.till_time_buttons
+                                if rect.collidepoint(event.pos)
+                            ),
                             None,
                         )
                         command = next(
@@ -526,6 +726,17 @@ class Game:
                         )
                         if sidebar_action_index is not None:
                             self.activate_sidebar_action(sidebar_action_index)
+                        elif till_time_action is not None:
+                            if till_time_action == "decrease":
+                                self.till_max_game_minutes = max(
+                                    60, self.till_max_game_minutes - 60
+                                )
+                                self.till_until_done = False
+                            elif till_time_action == "increase":
+                                self.till_max_game_minutes += 60
+                                self.till_until_done = False
+                            else:
+                                self.till_until_done = not self.till_until_done
                         elif quantity_change is not None:
                             self.area_command_quantity = max(
                                 1, min(99, self.area_command_quantity + quantity_change)
@@ -542,7 +753,12 @@ class Game:
                             else:
                                 self.active_command = command
                                 self.pending_target_areas.clear()
-                                self.log(f"{command}: drag a rectangle on the map.")
+                                suffix = (
+                                    " Or click the character to gather the nearest amount."
+                                    if command in AREA_COMMAND_TYPES
+                                    else ""
+                                )
+                                self.log(f"{command}: drag a rectangle on the map.{suffix}")
                         elif self.active_command and MAP_VIEWPORT.collidepoint(event.pos):
                             self.command_drag_start = self.camera.screen_to_world(event.pos)
                             self.command_drag_current = self.command_drag_start
@@ -567,6 +783,9 @@ class Game:
 
         self.map = reloaded_map
         self.objects = reloaded_map.objects
+        self.player.carried_objects = [
+            obj for obj in self.objects.values() if obj.container == "player"
+        ]
         self.camera.clamp((self.map.width, self.map.height))
         self.selected_id = None
         self.selected_tile = None
@@ -589,11 +808,16 @@ class Game:
         self.pending_source_areas.clear()
         self.pending_target_areas.clear()
         self.pending_empty_area_memory = False
+        self.pending_failed_memory_thought = "Why did I come here?"
         self.thought_bubble_text = None
         self.thought_bubble_timer = 0.0
         self.command_drag_start = None
         self.command_drag_current = None
         self.log(f"Reloaded map: {self.map.name}")
+
+    def reload_sprites(self) -> None:
+        self.object_sprites.reload()
+        self.log("Sprites reloaded.")
 
     def handle_morning_key(self, key: int) -> None:
         options = self.morning_options()
@@ -603,11 +827,13 @@ class Game:
             pygame.K_3: 2,
             pygame.K_4: 3,
             pygame.K_5: 4,
+            pygame.K_6: 5,
             pygame.K_KP1: 0,
             pygame.K_KP2: 1,
             pygame.K_KP3: 2,
             pygame.K_KP4: 3,
             pygame.K_KP5: 4,
+            pygame.K_KP6: 5,
         }.get(key)
         if number_index is not None and number_index < len(options):
             self.menu_index = number_index
@@ -650,10 +876,7 @@ class Game:
             self.record_routine_commands = True
             self.log("Direct Control selected. Click an object, then choose an action.")
         elif label == "Adjust Memory":
-            self.adjusting_memory = True
-            self.memory_edit_index = min(
-                self.memory_edit_index, max(0, len(self.day.remembered_routine) - 1)
-            )
+            self.open_memory_editor()
         else:
             self.day.mode = Mode.REPLAY
             self.day.replay_index = 0
@@ -674,13 +897,81 @@ class Game:
             self.simulation_paused = False
             self.log("Replaying the remembered routine.")
 
-    def handle_memory_editor_key(self, key: int, modifiers: int) -> None:
+    def start_auto_cheat_memory(self) -> None:
+        try:
+            loaded = load_memory_file(
+                "homestead", tile_size=self.map.tile_map.tile_size
+            )
+        except MapLoadError as exc:
+            self.log(f"Could not load homestead.memory: {exc}")
+            return
+        self.day.remembered_routine = list(loaded)
+        self.auto_cheat_memory = True
+        self.memory_edit_index = 0
+        self.menu_index = 0
+        self.log(
+            f"Loaded {len(self.day.remembered_routine)} orders from homestead.memory. Esc stops automatic replay."
+        )
+        if self.day.mode is Mode.MORNING:
+            self.choose_morning_option("Replay Memory and Sleep")
+
+    def stop_auto_cheat_memory(self) -> None:
+        self.auto_cheat_memory = False
+        self.cancel_current_command()
+        self.day.mode = Mode.DIRECT
+        self.day.replay_index = 0
+        self.replay_outcome = "expand"
+        self.record_routine_commands = True
+        self.simulation_paused = True
+        self.log("Automatic cheat-memory replay stopped.")
+
+    def open_memory_editor(self) -> None:
+        self.memory_editor_previous_pause = self.simulation_paused
+        self.simulation_paused = True
+        self.adjusting_memory = True
+        self.context_menu_options.clear()
+        self.context_menu_pos = None
+        self.memory_edit_field = None
+        self.memory_edit_buffer = ""
+        if (
+            self.day.mode is Mode.REPLAY
+            and self.day.replay_index < len(self.day.remembered_routine)
+        ):
+            self.memory_edit_index = self.day.replay_index
+        else:
+            self.memory_edit_index = min(
+                self.memory_edit_index,
+                max(0, len(self.day.remembered_routine) - 1),
+            )
+
+    def close_memory_editor(self) -> None:
+        self.adjusting_memory = False
+        self.memory_edit_field = None
+        self.memory_edit_buffer = ""
+        self.menu_index = 0
+        self.simulation_paused = self.memory_editor_previous_pause
+
+    def handle_memory_editor_key(
+        self, key: int, modifiers: int, text_input: str = ""
+    ) -> None:
         routine = self.day.remembered_routine
-        if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
-            self.adjusting_memory = False
-            self.menu_index = 0
+        if self.memory_edit_field is not None:
+            if key == pygame.K_ESCAPE:
+                self.memory_edit_field = None
+                self.memory_edit_buffer = ""
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.commit_memory_field()
+            elif key == pygame.K_BACKSPACE:
+                self.memory_edit_buffer = self.memory_edit_buffer[:-1]
+            elif text_input and text_input.isprintable():
+                self.memory_edit_buffer += text_input
+            return
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE, pygame.K_c):
+            self.close_memory_editor()
             return
         if not routine:
+            if key == pygame.K_n:
+                self.add_memory_step()
             return
         if key == pygame.K_UP:
             if modifiers & pygame.KMOD_SHIFT:
@@ -693,35 +984,167 @@ class Game:
             else:
                 self.memory_edit_index = (self.memory_edit_index + 1) % len(routine)
         elif key in (pygame.K_DELETE, pygame.K_BACKSPACE):
-            routine.pop(self.memory_edit_index)
-            self.memory_edit_index = min(self.memory_edit_index, max(0, len(routine) - 1))
+            self.remove_memory_step()
+        elif key == pygame.K_d and modifiers & pygame.KMOD_CTRL:
+            self.duplicate_memory_step()
+        elif key == pygame.K_n:
+            self.add_memory_step()
         elif key == pygame.K_r:
             self.replace_memory_step()
 
     def handle_memory_editor_click(self, pos: tuple[int, int]) -> None:
+        if self.memory_file_name_rect.collidepoint(pos):
+            self.memory_edit_field = "__memory_file_name__"
+            self.memory_edit_buffer = self.memory_file_name
+            return
         for rect, index in self.memory_editor_rows:
             if rect.collidepoint(pos):
                 self.memory_edit_index = index
+                self.memory_edit_field = None
+                return
+        for rect, field_name in self.memory_editor_fields:
+            if rect.collidepoint(pos) and self.day.remembered_routine:
+                self.memory_edit_field = field_name
+                value = getattr(
+                    self.day.remembered_routine[self.memory_edit_index], field_name
+                )
+                self.memory_edit_buffer = json.dumps(
+                    routine_field_editor_value(
+                        self.day.remembered_routine[self.memory_edit_index],
+                        field_name,
+                    )
+                )
                 return
         for rect, action in self.memory_editor_buttons:
             if not rect.collidepoint(pos):
                 continue
             if action == "Done":
-                self.adjusting_memory = False
-                self.menu_index = 0
+                self.close_memory_editor()
             elif action == "Move Up":
                 self.move_memory_step(-1)
             elif action == "Move Down":
                 self.move_memory_step(1)
-            elif action == "Remove" and self.day.remembered_routine:
-                self.day.remembered_routine.pop(self.memory_edit_index)
-                self.memory_edit_index = min(
-                    self.memory_edit_index,
-                    max(0, len(self.day.remembered_routine) - 1),
-                )
-            elif action == "Replace":
-                self.replace_memory_step()
+            elif action == "Remove":
+                self.remove_memory_step()
+            elif action == "Duplicate":
+                self.duplicate_memory_step()
+            elif action == "New":
+                self.add_memory_step()
+            elif action == "Save":
+                self.save_named_memory(self.memory_file_name)
+            elif action == "Load":
+                self.load_named_memory(self.memory_file_name)
+            elif action == "Save Homestead":
+                self.memory_file_name = "homestead"
+                self.save_named_memory("homestead")
             return
+
+    def remove_memory_step(self) -> None:
+        routine = self.day.remembered_routine
+        if not routine:
+            return
+        removed = self.memory_edit_index
+        routine.pop(removed)
+        if self.day.mode is Mode.REPLAY and removed < self.day.replay_index:
+            self.day.replay_index -= 1
+        self.day.replay_index = min(self.day.replay_index, len(routine))
+        self.memory_edit_index = min(removed, max(0, len(routine) - 1))
+
+    def duplicate_memory_step(self) -> None:
+        routine = self.day.remembered_routine
+        if not routine:
+            return
+        insertion = self.memory_edit_index + 1
+        routine.insert(insertion, routine[self.memory_edit_index])
+        if self.day.mode is Mode.REPLAY and insertion <= self.day.replay_index:
+            self.day.replay_index += 1
+        self.memory_edit_index = insertion
+
+    def add_memory_step(self) -> None:
+        self.day.remembered_routine.append(RoutineStep(None, "Move To"))
+        self.memory_edit_index = len(self.day.remembered_routine) - 1
+
+    def commit_memory_field(self) -> None:
+        if self.memory_edit_field == "__memory_file_name__":
+            try:
+                # Resolving validates the name without touching the filesystem.
+                memory_file_path(self.memory_edit_buffer)
+            except MapLoadError as exc:
+                self.log(str(exc))
+                return
+            self.memory_file_name = self.memory_edit_buffer.removesuffix(".memory")
+            self.memory_edit_field = None
+            self.memory_edit_buffer = ""
+            return
+        if self.memory_edit_field is None or not self.day.remembered_routine:
+            return
+        try:
+            value = json.loads(self.memory_edit_buffer)
+            field_name = self.memory_edit_field
+            if field_name in {
+                "target_point",
+                "area_bounds",
+                "secondary_bounds",
+                "source_areas",
+                "target_areas",
+            }:
+                value = routine_field_runtime_value(field_name, value)
+            elif field_name == "action" and not isinstance(value, str):
+                raise ValueError("action requires a JSON string")
+            elif field_name in {"target_type", "target_build_memory"} and not (
+                value is None or isinstance(value, str)
+            ):
+                raise ValueError(f"{field_name} requires a JSON string or null")
+            elif field_name in {
+                "target_id",
+                "quantity",
+                "max_game_minutes",
+            } and not (value is None or isinstance(value, int)):
+                raise ValueError(f"{field_name} requires an integer or null")
+            elif field_name in {"till_until_done", "nearest_to_player"} and not isinstance(
+                value, bool
+            ):
+                raise ValueError(f"{field_name} requires true or false")
+            step = self.day.remembered_routine[self.memory_edit_index]
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                step, **{field_name: value}
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self.log(f"Memory field is invalid: {exc}")
+            return
+        self.memory_edit_field = None
+        self.memory_edit_buffer = ""
+
+    def save_named_memory(self, name: str) -> None:
+        try:
+            path = save_memory_file(
+                name,
+                self.day.remembered_routine,
+                tile_size=self.map.tile_map.tile_size,
+            )
+        except (OSError, MapLoadError) as exc:
+            self.log(f"Could not save memory: {exc}")
+            return
+        self.log(
+            f"Saved {len(self.day.remembered_routine)} orders to {path.name}."
+        )
+
+    def load_named_memory(self, name: str) -> None:
+        try:
+            routine = load_memory_file(
+                name, tile_size=self.map.tile_map.tile_size
+            )
+        except MapLoadError as exc:
+            self.log(f"Could not load memory: {exc}")
+            return
+        self.day.remembered_routine = list(routine)
+        self.day.replay_index = 0
+        self.memory_edit_index = 0
+        self.memory_edit_field = None
+        self.memory_edit_buffer = ""
+        self.log(
+            f"Loaded {len(routine)} orders from {memory_file_path(name).name}."
+        )
 
     def move_memory_step(self, direction: int) -> None:
         routine = self.day.remembered_routine
@@ -734,6 +1157,11 @@ class Game:
             routine[destination],
             routine[self.memory_edit_index],
         )
+        if self.day.mode is Mode.REPLAY:
+            if self.day.replay_index == self.memory_edit_index:
+                self.day.replay_index = destination
+            elif self.day.replay_index == destination:
+                self.day.replay_index = self.memory_edit_index
         self.memory_edit_index = destination
 
     def replace_memory_step(self) -> None:
@@ -811,7 +1239,10 @@ class Game:
         self.path_target = target
         self.context_menu_options = (
             build_ground_context_menu_options(
-                located[2], self.player, self.map.tile_states.get((located[0], located[1]))
+                located[2],
+                self.player,
+                self.map.tile_states.get((located[0], located[1])),
+                self.crop_at_tile(located[0], located[1]),
             )
             if target is not None and located is not None
             else []
@@ -837,6 +1268,8 @@ class Game:
             return
         option = self.context_menu_options[index]
         if not action_option_enabled(option):
+            if option == RUINED_BUCKET_REQUIRED:
+                self.log("The ruined bucket cannot hold water.")
             return
         self.context_menu_options = []
         self.context_menu_pos = None
@@ -862,31 +1295,41 @@ class Game:
                 self.log(f"No route to {target.name}.")
             self.context_ground_target = None
             return
+        if option == "Drop Bucket" and self.selected_id is None:
+            target = self.context_ground_target
+            if target is not None and self.plan_path(target):
+                self.pending_area_target = AreaTarget("Drop Bucket", target)
+                self.area_job_timer = 0.0
+                self.resume_for_command()
+                self.path_target = target
+            self.context_ground_target = None
+            return
         if option in {"Gather Water", "Water Crop", "Tend Plant"} and self.selected_id is None:
             target = self.context_ground_target
             located = self.map.tile_map.tile_at_world(*target) if target is not None else None
             state = self.map.tile_states.get((located[0], located[1])) if located is not None else None
+            crop = self.crop_at_tile(located[0], located[1]) if located is not None else None
+            crop_state = crop.state if crop is not None else {}
             valid = located is not None and (
                 (
                     option == "Gather Water"
                     and located[2].kind in {TileKind.SHALLOW_WATER, TileKind.POND}
                     and self.player.has_bucket
+                    and self.bucket_capacity > 0
                     and not self.player.bucket_filled
                 )
                 or (
                     option == "Water Crop"
-                    and state is not None
-                    and state.crop is not None
+                    and crop is not None
                     and self.player.has_bucket
                     and self.player.bucket_filled
-                    and not state.watered
+                    and float(crop_state.get("water", 0.0)) < 100.0
                 )
                 or (
                     option == "Tend Plant"
-                    and state is not None
-                    and state.crop is not None
-                    and not state.tended
-                    and state.crop_growth < 1.0
+                    and crop is not None
+                    and float(crop_state.get("tended", 0.0)) < 100.0
+                    and float(crop_state.get("growth_progress", 0.0)) < 1.0
                 )
             )
             if target is not None and valid and self.plan_path(target):
@@ -948,7 +1391,12 @@ class Game:
             self.active_command = None
             return
         self.active_command = selected
-        self.log(f"{selected}: drag a rectangle on the map.")
+        suffix = (
+            " Or click the character to gather the nearest amount."
+            if selected in AREA_COMMAND_TYPES
+            else ""
+        )
+        self.log(f"{selected}: drag a rectangle on the map.{suffix}")
 
     def screen_to_world(self, pos: tuple[int, int]) -> tuple[int, int] | None:
         return self.camera.screen_to_world(pos)
@@ -959,6 +1407,18 @@ class Game:
         self.command_drag_start = None
         self.command_drag_current = None
         if start is None or end is None or self.active_command is None:
+            return
+        if (
+            self.active_command in AREA_COMMAND_TYPES
+            and math.dist(end, (self.player.x, self.player.y)) <= self.player_radius
+            and math.dist(start, end) <= self.player_radius
+        ):
+            command = self.active_command
+            self.active_command = None
+            self.pending_target_areas.clear()
+            self.queue_nearest_gather_command(
+                command, self.area_command_quantity, record=True
+            )
             return
         left, top, right, bottom = tile_aligned_area_bounds(
             start, end, self.map.tile_map.tile_size
@@ -1005,7 +1465,7 @@ class Game:
                     record=True,
                 )
             return
-        if self.active_command == "Build Barrel":
+        if self.active_command in BUILD_COMMAND_TYPES:
             left, top, right, bottom = tile_aligned_area_bounds(
                 end, end, self.map.tile_map.tile_size
             )
@@ -1024,6 +1484,20 @@ class Game:
                 quantity,
                 record=True,
                 target_areas=target_areas,
+                max_game_minutes=(
+                    (
+                        None
+                        if self.till_until_done
+                        else self.till_max_game_minutes
+                    )
+                    if self.active_command == "Till Grassland"
+                    else None
+                ),
+                till_until_done=(
+                    self.till_until_done
+                    if self.active_command == "Till Grassland"
+                    else False
+                ),
             )
             self.active_command = None
             return
@@ -1069,6 +1543,16 @@ class Game:
                 self.area_command_quantity,
                 record=True,
                 target_areas=target_areas,
+                max_game_minutes=(
+                    None
+                    if command == "Till Grassland" and self.till_until_done
+                    else self.till_max_game_minutes
+                    if command == "Till Grassland"
+                    else None
+                ),
+                till_until_done=(
+                    self.till_until_done if command == "Till Grassland" else False
+                ),
             )
 
     def queue_barrel_fill_command(
@@ -1082,7 +1566,9 @@ class Game:
         barrel = self.objects.get(barrel_id)
         if barrel is None or barrel.kind is not ObjectKind.BARREL or not barrel.active:
             if self.day.mode is Mode.REPLAY:
-                self.visit_failed_memory(None)
+                self.visit_failed_memory(
+                    None, "Fill Barrel", "the barrel is no longer here"
+                )
             return
         self.barrel_fill_job = BarrelFillJob(barrel_id, source_areas)
         if record and self.record_routine_commands:
@@ -1094,6 +1580,11 @@ class Game:
                     area_bounds=source_areas[0],
                     target_point=barrel.center,
                     source_areas=source_areas,
+                    target_build_memory=str(
+                        barrel.state.get("build_memory_id")
+                    )
+                    if barrel.state.get("build_memory_id")
+                    else None,
                 )
             )
         self.resume_for_command()
@@ -1133,7 +1624,9 @@ class Game:
                     (crop_bounds[0] + crop_bounds[2]) / 2,
                     (crop_bounds[1] + crop_bounds[3]) / 2,
                 )
-                self.visit_failed_memory(center)
+                self.visit_failed_memory(
+                    center, "Water Crops", "none of these crops need water"
+                )
             else:
                 self.log("No crops in that area currently need water.")
             return
@@ -1159,17 +1652,22 @@ class Game:
         *,
         record: bool,
         target_areas: tuple[tuple[int, int, int, int], ...] | None = None,
+        max_game_minutes: int | None = None,
+        till_until_done: bool = False,
     ) -> None:
         target_areas = target_areas or (bounds,)
-        if command == "Build Barrel" and not self.can_afford_build("barrel"):
-            cost = self.build_cost("barrel")
+        build_type = BUILD_COMMAND_TYPES.get(command)
+        if build_type is not None and not self.can_afford_build(build_type):
+            cost = self.build_cost(build_type)
             requirements = " and ".join(
                 f"{amount} {item}" for item, amount in cost.items()
             )
-            self.log(f"Need {requirements} to build a barrel.")
+            self.log(f"Need {requirements} to build a {build_type.replace('_', ' ')}.")
             if self.day.mode is Mode.REPLAY:
                 center = ((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
-                self.visit_failed_memory(center)
+                self.visit_failed_memory(
+                    center, command, "I do not have the required materials"
+                )
             return
         targets = [
             target
@@ -1183,18 +1681,67 @@ class Game:
             }.values()
         )
         targets.sort(key=lambda target: math.dist((self.player.x, self.player.y), target.point))
-        if command == "Plant Wheat":
+        if command == "Till Grassland":
+            # Quantity limits how many distinct tiles are included. The time
+            # budget controls how many till actions are performed among them.
+            targets = targets[:quantity]
+            repetitions: list[AreaTarget] = []
+            progress_per_action = self.map.till_progress_per_action
+            for target in targets:
+                located = self.map.tile_map.tile_at_world(*target.point)
+                if located is None:
+                    continue
+                column, row, _tile = located
+                state = self.map.tile_states.setdefault(
+                    (column, row), LevelTileState(column, row)
+                )
+                if state.persistence_modifier is None:
+                    state.persistence_modifier = self.persistence_modifier(
+                        f"tile:{column}:{row}",
+                        self.map.tile_persistence_modifier_range,
+                    )
+                increment = progress_per_action * state.persistence_modifier
+                remaining_actions = max(
+                    0,
+                    math.ceil(
+                        (100.0 - state.till_percentage) / increment - 1e-9
+                    ),
+                )
+                repetitions.extend(
+                    AreaTarget(
+                        target.action,
+                        target.point,
+                        target.target_id,
+                        target.prerequisite_target_ids,
+                        target.placement_point,
+                    )
+                    for _ in range(remaining_actions)
+                )
+            if till_until_done:
+                targets = repetitions
+            else:
+                budget = max_game_minutes if max_game_minutes is not None else 60
+                action_minutes = tilling_duration_seconds(self.player.hoe_quality)
+                full_actions = max(0, int(budget // action_minutes))
+                targets = repetitions[:full_actions]
+                remainder = budget - full_actions * action_minutes
+                if remainder > 1e-9 and full_actions < len(repetitions):
+                    partial = repetitions[full_actions]
+                    partial.work_fraction = min(1.0, remainder / action_minutes)
+                    targets.append(partial)
+        elif command == "Plant Wheat":
             targets = targets[: self.player.inventory["seed"]]
         elif command in {"Gather Water", "Water Crops"}:
             targets = targets[:1]
-        elif command == "Build Barrel":
-            cost = self.build_cost("barrel")
+        elif build_type is not None:
+            cost = self.build_cost(build_type)
             affordable = min(
                 (self.player.inventory[item] // amount for item, amount in cost.items()),
                 default=0,
             )
             targets = targets[:min(1, affordable)]
-        targets = targets[:quantity]
+        if command != "Till Grassland":
+            targets = targets[:quantity]
         self.area_targets = targets
         self.pending_area_target = None
         self.area_job_timer = 0.0
@@ -1206,32 +1753,126 @@ class Game:
                     area_bounds=bounds,
                     quantity=quantity,
                     target_areas=target_areas,
+                    max_game_minutes=max_game_minutes,
+                    till_until_done=till_until_done,
                 )
             )
         if targets:
             self.resume_for_command()
         elif self.day.mode is Mode.REPLAY:
+            already_built = (
+                command in BUILD_COMMAND_TYPES
+                and any(
+                    obj.active
+                    and obj.type_id == build_type
+                    and any(
+                        area[0] <= obj.center[0] <= area[2]
+                        and area[1] <= obj.center[1] <= area[3]
+                        for area in target_areas
+                    )
+                    for obj in self.objects.values()
+                )
+            )
+            if already_built:
+                self.pending_failed_memory_thought = self.failed_memory_thought(
+                    command, "already built"
+                )
+                self.show_empty_area_memory_thought()
+                self.resume_for_command()
+                self.log(
+                    f"Area command skipped because the {build_type} is already built."
+                )
+                return
             center = (
                 (bounds[0] + bounds[2]) / 2,
                 (bounds[1] + bounds[3]) / 2,
             )
             self.pending_empty_area_memory = True
+            self.pending_failed_memory_thought = self.failed_memory_thought(command)
             if not self.plan_path(center):
                 self.show_empty_area_memory_thought()
             self.resume_for_command()
-        elif command == "Build Barrel":
-            self.log("A barrel cannot be built on that tile.")
+        elif build_type is not None:
+            self.log(f"A {build_type.replace('_', ' ')} cannot be built on that tile.")
         self.log(f"Area command queued {len(targets)} target{'s' if len(targets) != 1 else ''}.")
+
+    def queue_nearest_gather_command(
+        self, command: str, quantity: int, *, record: bool
+    ) -> None:
+        if command not in AREA_COMMAND_TYPES:
+            return
+        targets = self.build_area_targets(
+            command, (0, 0, self.map.width, self.map.height)
+        )
+        targets.sort(
+            key=lambda target: math.dist(
+                (self.player.x, self.player.y), target.point
+            )
+        )
+        self.area_targets = targets[:quantity]
+        self.pending_area_target = None
+        self.area_job_timer = 0.0
+        if record and self.record_routine_commands:
+            self.day.today_routine.append(
+                RoutineStep(
+                    None,
+                    command,
+                    quantity=quantity,
+                    nearest_to_player=True,
+                )
+            )
+        if self.area_targets:
+            self.resume_for_command()
+        elif self.day.mode is Mode.REPLAY:
+            self.show_failed_nearest_gather(command)
+            self.resume_for_command()
+        self.log(
+            f"Nearest gather queued {len(self.area_targets)} "
+            f"target{'s' if len(self.area_targets) != 1 else ''}."
+        )
+
+    def show_failed_nearest_gather(self, command: str) -> None:
+        self.pending_failed_memory_thought = self.failed_memory_thought(command)
+        self.show_empty_area_memory_thought()
 
     def show_empty_area_memory_thought(self) -> None:
         self.pending_empty_area_memory = False
-        self.thought_bubble_text = "Why did I come here?"
+        self.thought_bubble_text = self.pending_failed_memory_thought
+        self.pending_failed_memory_thought = "Why did I come here?"
         self.thought_bubble_timer = 2.5
         self.log(self.thought_bubble_text)
 
-    def visit_failed_memory(self, point: tuple[float, float] | None) -> None:
+    @staticmethod
+    def failed_memory_thought(action: str, reason: str | None = None) -> str:
+        if action in BUILD_COMMAND_TYPES and reason == "already built":
+            return "I remember building it fondly."
+        reasons = {
+            "Gather Pebbles": "there are no pebbles here",
+            "Gather Branches": "there are no branches here",
+            "Gather Seeds": "there are no seeds here",
+            "Gather Tall Grass": "there is no tall grass here",
+            "Chop Trees": "there are no trees here to chop",
+            "Till Grassland": "there is no grassland here to till",
+            "Plant Wheat": "there is no open soil here to plant",
+            "Water Crops": "none of these crops need water",
+            "Tend Crops": "none of these crops need tending",
+            "Harvest Wheat": "there is no mature wheat here",
+            "Build Barrel": "a barrel cannot be built here",
+            "Build Cupboard": "a cupboard cannot be built here",
+            "Fill Barrel": "I cannot fill the barrel from here",
+        }
+        explanation = reason or reasons.get(action, "I cannot do that now")
+        return f"I came here to {action.lower()}, but {explanation}."
+
+    def visit_failed_memory(
+        self,
+        point: tuple[float, float] | None,
+        action: str = "do something",
+        reason: str | None = None,
+    ) -> None:
         destination = point or (self.player.x, self.player.y)
         self.pending_empty_area_memory = True
+        self.pending_failed_memory_thought = self.failed_memory_thought(action, reason)
         if not self.plan_path(destination):
             self.show_empty_area_memory_thought()
         self.resume_for_command()
@@ -1262,8 +1903,10 @@ class Game:
                     targets.append(
                         AreaTarget("Chop Down Tree", obj.center, obj.object_id)
                     )
-        elif command in {"Gather Water", "Till Grassland", "Plant Wheat", "Water Crops", "Tend Crops", "Harvest Wheat", "Build Barrel"}:
+        elif command in {"Gather Water", "Till Grassland", "Plant Wheat", "Water Crops", "Tend Crops", "Harvest Wheat", *BUILD_COMMAND_TYPES}:
             if command == "Gather Water" and (not self.player.has_bucket or self.player.bucket_filled):
+                return []
+            if command == "Gather Water" and self.bucket_capacity <= 0:
                 return []
             if command == "Till Grassland" and not self.player.carrying_hoe:
                 return []
@@ -1271,8 +1914,8 @@ class Game:
                 return []
             if command == "Water Crops" and not self.player.has_bucket:
                 return []
-            if command == "Build Barrel" and (
-                not self.can_afford_build("barrel")
+            if command in BUILD_COMMAND_TYPES and (
+                not self.can_afford_build(BUILD_COMMAND_TYPES[command])
             ):
                 return []
             tile_map = self.map.tile_map
@@ -1288,7 +1931,7 @@ class Game:
                         continue
                     if command == "Gather Water" and tile.kind is TileKind.SHALLOW_WATER:
                         targets.append(AreaTarget("Gather Water", point))
-                    elif command == "Build Barrel":
+                    elif command in BUILD_COMMAND_TYPES:
                         active_objects = [
                             self.objects.get(int(prop.removeprefix("object:")))
                             for prop in tile.properties
@@ -1318,7 +1961,7 @@ class Game:
                                 )
                                 targets.append(
                                     AreaTarget(
-                                        "Build Barrel",
+                                        command,
                                         interaction,
                                         placement_point=point,
                                     )
@@ -1354,26 +1997,33 @@ class Game:
                                 )
                             )
                     elif command == "Plant Wheat" and tile.kind is TileKind.SOIL:
-                        state = self.map.tile_states.get((column, row))
-                        if state is not None and state.crop is None:
+                        if self.crop_at_tile(column, row) is None:
                             targets.append(AreaTarget("Plant Wheat", point))
                     elif command == "Water Crops" and tile.kind is TileKind.SOIL:
-                        state = self.map.tile_states.get((column, row))
-                        if state is not None and state.crop is not None and not state.watered:
+                        crop = self.crop_at_tile(column, row)
+                        if (
+                            crop is not None
+                            and float(crop.state.get("water", 0.0)) < 100.0
+                        ):
                             targets.append(AreaTarget("Water Crops", point))
                     elif command == "Tend Crops" and tile.kind is TileKind.SOIL:
-                        state = self.map.tile_states.get((column, row))
+                        crop = self.crop_at_tile(column, row)
                         if (
-                            state is not None
-                            and state.crop is not None
-                            and not state.tended
-                            and state.crop_growth < 1.0
+                            crop is not None
+                            and float(crop.state.get("tended", 0.0)) < 100.0
+                            and float(crop.state.get("growth_progress", 0.0)) < 1.0
                         ):
                             targets.append(AreaTarget("Tend Plant", point))
                     elif command == "Harvest Wheat" and tile.kind is TileKind.SOIL:
-                        state = self.map.tile_states.get((column, row))
-                        if state is not None and state.crop == "wheat" and state.crop_growth >= 1.0:
-                            targets.append(AreaTarget("Harvest Wheat", point))
+                        crop = self.crop_at_tile(column, row)
+                        if (
+                            crop is not None
+                            and crop.variant == "wheat"
+                            and crop.form == "mature"
+                        ):
+                            targets.append(
+                                AreaTarget("Harvest Wheat", point, crop.object_id)
+                            )
         return targets
 
     def queue_job(
@@ -1383,22 +2033,28 @@ class Game:
         *,
         record: bool,
         advances_replay: bool = True,
-    ) -> None:
+    ) -> bool:
         if self.pending_job is not None:
-            return
+            return False
         obj = self.objects.get(target_id)
         if obj is None or action not in available_actions(obj, self.player):
             self.log(f"Skipped unavailable job: {action}.")
             if self.day.mode is Mode.REPLAY and advances_replay:
                 self.day.replay_index += 1
-                self.visit_failed_memory(obj.center if obj is not None else None)
-            return
+                self.visit_failed_memory(
+                    obj.center if obj is not None else None,
+                    action,
+                    "that task is no longer available",
+                )
+            return False
         if not self.plan_path_to_object(obj):
             self.log(f"No route to {obj.name}.")
             if self.day.mode is Mode.REPLAY and advances_replay:
                 self.day.replay_index += 1
-                self.visit_failed_memory(obj.center)
-            return
+                self.visit_failed_memory(
+                    obj.center, action, f"I cannot reach the {obj.name.lower()}"
+                )
+            return False
         self.pending_job = PendingJob(target_id, action, self.walk_target, advances_replay)
         self.resume_for_command()
         self.selected_id = None
@@ -1406,15 +2062,40 @@ class Game:
         self.job_timer = 0.0
         if record and self.record_routine_commands and action != "Sleep":
             self.day.today_routine.append(
-                RoutineStep(target_id, action, obj.type_id, target_point=obj.center)
+                RoutineStep(
+                    target_id,
+                    action,
+                    obj.type_id,
+                    target_point=obj.center,
+                    target_build_memory=str(obj.state.get("build_memory_id"))
+                    if obj.state.get("build_memory_id")
+                    else None,
+                )
             )
+        return True
 
     def resolve_routine_target(self, step: RoutineStep) -> int | None:
         """Resolve an object-specific order without changing what it referred to."""
+        build_memory_id = self.build_memory_id_for_step(step)
+        if build_memory_id is not None:
+            built = self.object_for_build_memory(build_memory_id)
+            if built is not None and step.action in available_actions(built, self.player):
+                return built.object_id
+            return None
         original = self.objects.get(step.target_id)
         if original is not None and step.action in available_actions(original, self.player):
             return original.object_id
         return None
+
+    def build_memory_id_for_step(self, step: RoutineStep) -> str | None:
+        if step.target_build_memory is not None:
+            return step.target_build_memory
+        if step.target_type is None or step.target_point is None:
+            return None
+        column = int(step.target_point[0] // self.map.tile_map.tile_size)
+        row = int(step.target_point[1] // self.map.tile_map.tile_size)
+        candidate = f"{step.target_type}:{column}:{row}"
+        return candidate if candidate in self.build_memories else None
 
     def plan_path(self, target: tuple[float, float]) -> bool:
         path = self.build_navigation_path(target)
@@ -1461,7 +2142,7 @@ class Game:
                 if (
                     tile_map.tile_at(column, row) is not None
                     and self.can_stand_at(*center)
-                    and distance_to_object(center, obj) <= INTERACTION_DISTANCE
+                    and distance_to_object(center, obj) <= self.interaction_distance
                     and self.tile_can_access_object(column, row, obj)
                 ):
                     candidates.append(center)
@@ -1512,16 +2193,17 @@ class Game:
         return candidate.passable[candidate_edge] and object_tile.passable[object_edge]
 
     def move_along_path(self, dt: float) -> bool:
-        while self.navigation_path:
+        remaining_distance = max(0.0, self.player.speed * dt)
+        while self.navigation_path and remaining_distance > 0.0:
             target_x, target_y = self.navigation_path[0]
             dx = target_x - self.player.x
             dy = target_y - self.player.y
             distance = math.hypot(dx, dy)
-            if distance <= 4:
+            if distance <= 0.001:
                 self.player.x, self.player.y = target_x, target_y
                 self.navigation_path.pop(0)
                 continue
-            amount = min(distance, self.player.speed * dt)
+            amount = min(distance, remaining_distance)
             next_x = self.player.x + dx / distance * amount
             next_y = self.player.y + dy / distance * amount
             if not self.can_stand_at(next_x, next_y):
@@ -1530,20 +2212,25 @@ class Game:
                 return False
             self.player.x = next_x
             self.player.y = next_y
-            return True
+            remaining_distance -= amount
+            if amount >= distance:
+                self.player.x, self.player.y = target_x, target_y
+                self.navigation_path.pop(0)
         self.walk_target = None
+        if self.navigation_path:
+            self.walk_target = self.navigation_path[-1]
         return True
 
     def can_stand_at(self, x: float, y: float) -> bool:
         if (
-            x < PLAYER_RADIUS
-            or y < PLAYER_RADIUS
-            or x > self.map.width - PLAYER_RADIUS
-            or y > self.map.height - PLAYER_RADIUS
+            x < self.player_radius
+            or y < self.player_radius
+            or x > self.map.width - self.player_radius
+            or y > self.map.height - self.player_radius
         ):
             return False
 
-        if not self.map.tile_map.can_stand_at(x, y, PLAYER_RADIUS):
+        if not self.map.tile_map.can_stand_at(x, y, self.player_radius):
             return False
         return True
 
@@ -1560,7 +2247,11 @@ class Game:
             for column in range(first_column - 2, last_column + 3)
             if tile_map.tile_at(column, row) is not None
         ]
-        standable = [point for point in candidates if tile_map.can_stand_at(*point, PLAYER_RADIUS)]
+        standable = [
+            point
+            for point in candidates
+            if tile_map.can_stand_at(*point, self.player_radius)
+        ]
         if not standable:
             raise MapLoadError("The bed has no valid adjacent player spawn tile")
         north_of_bed = [point for point in standable if point[1] < bed.y]
@@ -1635,17 +2326,143 @@ class Game:
             self.log("Command cancelled.")
 
     def advance_crop_growth(self, game_minutes: float) -> None:
-        for (column, row), state in self.map.tile_states.items():
-            if state.crop is None or state.crop_growth >= 1.0:
+        growth = self.map.object_types["crop"].growth
+        for crop in (
+            obj
+            for obj in self.objects.values()
+            if obj.active and obj.type_id == "crop"
+        ):
+            progress = float(crop.state.get("growth_progress", 0.0))
+            if progress >= 1.0 or crop.form == "dead":
                 continue
-            multiplier = (
-                (CROP_WATERED_MULTIPLIER if state.watered else 1.0)
-                * (CROP_TENDED_MULTIPLIER if state.tended else 1.0)
+            crop.state["age"] = float(crop.state.get("age", 0.0)) + game_minutes
+            remaining_minutes = game_minutes
+            base_minutes = float(growth["base_minutes"])
+            while remaining_minutes > 1e-9 and progress < 1.0:
+                water = max(0.0, min(100.0, float(crop.state.get("water", 0.0))))
+                tended = max(
+                    0.0, min(100.0, float(crop.state.get("tended", 0.0)))
+                )
+                water_multiplier = 1.0 + (
+                    float(growth["water_multiplier"]) - 1.0
+                ) * water / 100.0
+                tended_multiplier = 1.0 + (
+                    float(growth["tended_multiplier"]) - 1.0
+                ) * tended / 100.0
+                rate = water_multiplier * tended_multiplier / base_minutes
+                next_step = min(100, math.floor(progress * 100 + 1e-9) + 1)
+                next_boundary = next_step / 100.0
+                minutes_to_boundary = (next_boundary - progress) / rate
+                if remaining_minutes + 1e-9 < minutes_to_boundary:
+                    progress += remaining_minutes * rate
+                    remaining_minutes = 0.0
+                    break
+                progress = next_boundary
+                remaining_minutes -= minutes_to_boundary
+                self.decay_crop_care(crop, next_step)
+            crop.state["growth_progress"] = progress
+            next_form = (
+                "mature"
+                if progress >= 1.0
+                else "growing"
+                if progress >= 0.5
+                else "sprout"
+                if progress >= 0.15
+                else "seed"
             )
-            state.crop_growth = min(
-                1.0,
-                state.crop_growth + game_minutes * multiplier / CROP_BASE_GROWTH_MINUTES,
+            if crop.form != next_form:
+                self.apply_object_form(crop, next_form)
+
+    def decay_crop_care(self, crop: WorldObject, growth_percent: int) -> None:
+        decay_rules = self.map.object_types["crop"].growth.get(
+            "decay_per_growth_percent", {}
+        )
+        if not isinstance(decay_rules, dict):
+            return
+        for field in ("water", "tended"):
+            bounds = decay_rules.get(field, [0.0, 0.0])
+            if not isinstance(bounds, list) or len(bounds) != 2:
+                continue
+            decay_percent = random.Random(
+                f"remembering:crop-care-decay:{crop.object_id}:{growth_percent}:{field}"
+            ).uniform(float(bounds[0]), float(bounds[1]))
+            crop.state[field] = max(
+                0.0,
+                float(crop.state.get(field, 0.0))
+                * (1.0 - decay_percent / 100.0),
             )
+
+    def crop_at_tile(self, column: int, row: int) -> WorldObject | None:
+        tile_size = self.map.tile_map.tile_size
+        return next(
+            (
+                obj
+                for obj in self.objects.values()
+                if obj.active
+                and obj.type_id == "crop"
+                and int(obj.center[0] // tile_size) == column
+                and int(obj.center[1] // tile_size) == row
+            ),
+            None,
+        )
+
+    def plant_crop(
+        self, column: int, row: int, variant: str = "wheat"
+    ) -> WorldObject:
+        definition = self.map.object_types["crop"]
+        form = definition.form_definition("seed", variant)
+        growth = definition.growth
+        tile_size = self.map.tile_map.tile_size
+        center_x, center_y = self.map.tile_map.tile_center(column, row)
+        initial_randomizer = random.Random(
+            f"remembering:crop-initial-care:{max(self.objects, default=0) + 1}"
+        )
+
+        def initial_percentage(field: str) -> float:
+            bounds = growth.get(field, [0.0, 5.0])
+            if not isinstance(bounds, list) or len(bounds) != 2:
+                return 0.0
+            return initial_randomizer.uniform(float(bounds[0]), float(bounds[1]))
+
+        crop = WorldObject(
+            object_id=max(self.objects, default=0) + 1,
+            name=form.name or definition.name_for(variant),
+            kind=definition.kind,
+            x=round(center_x - form.footprint[0] * tile_size / 2),
+            y=round(center_y - form.footprint[1] * tile_size / 2),
+            width=form.footprint[0] * tile_size,
+            height=form.footprint[1] * tile_size,
+            state={
+                "age": 0.0,
+                "growth_progress": 0.0,
+                "water": initial_percentage("initial_water_percentage"),
+                "health": 100,
+                "fertilized": False,
+                "disease": None,
+                "tended": initial_percentage("initial_tended_percentage"),
+            },
+            blocks_movement=form.blocks_movement,
+            blocks_vision=form.blocks_vision,
+            mobility=form.mobility,
+            traits=form.traits,
+            descriptions=dict(form.descriptions),
+            interactions={
+                action: dict(details) for action, details in form.interactions.items()
+            },
+            capacity=form.capacity_for(100),
+            nutrition=form.nutrition,
+            type_id="crop",
+            quality=100,
+            persistent=False,
+            variant=variant,
+            form="seed",
+            container=None,
+        )
+        self.objects[crop.object_id] = crop
+        state = self.map.tile_states.setdefault(
+            (column, row), LevelTileState(column, row)
+        )
+        return crop
 
     def water_sources_in_bounds(
         self, bounds: tuple[int, int, int, int]
@@ -1684,13 +2501,23 @@ class Game:
         job = self.barrel_fill_job
         if job is None:
             return False
+        if not self.player.has_bucket or self.bucket_capacity <= 0:
+            self.barrel_fill_job = None
+            self.navigation_path = []
+            self.walk_target = None
+            self.log("The ruined bucket cannot hold water.")
+            return True
         barrel = self.objects.get(job.barrel_id)
         if barrel is None or not barrel.active or barrel.kind is not ObjectKind.BARREL:
             self.barrel_fill_job = None
-            self.visit_failed_memory(barrel.center if barrel is not None else None)
+            self.visit_failed_memory(
+                barrel.center if barrel is not None else None,
+                "Fill Barrel",
+                "the barrel is no longer available",
+            )
             return True
         data = self.barrel_state(barrel)
-        if int(data["water_uses"]) >= BARREL_CAPACITY:
+        if int(data["water_uses"]) >= self.barrel_capacity:
             self.barrel_fill_job = None
             self.navigation_path = []
             self.walk_target = None
@@ -1700,7 +2527,9 @@ class Game:
             if self.player.bucket_water_uses > 0:
                 if not self.plan_path_to_object(barrel):
                     self.barrel_fill_job = None
-                    self.visit_failed_memory(barrel.center)
+                    self.visit_failed_memory(
+                        barrel.center, "Fill Barrel", "I cannot reach the barrel"
+                    )
                 else:
                     job.phase = "barrel"
                 return True
@@ -1718,27 +2547,30 @@ class Game:
             self.barrel_fill_job = None
             first_area = job.source_areas[0]
             center = ((first_area[0] + first_area[2]) / 2, (first_area[1] + first_area[3]) / 2)
-            self.visit_failed_memory(center)
+            self.visit_failed_memory(
+                center, "Fill Barrel", "there is no reachable water source here"
+            )
             return True
         if self.navigation_path:
             if not self.move_along_path(dt):
                 job.phase = "choose"
             return True
         if job.phase == "source":
-            self.player.bucket_water_uses = BUCKET_CAPACITY
+            self.player.bucket_water_uses = self.bucket_capacity
             self.log("Filled the bucket from the selected water area.")
             job.phase = "choose"
             return True
         if job.phase == "barrel":
             moved = min(
                 self.player.bucket_water_uses,
-                BARREL_CAPACITY - int(data["water_uses"]),
+                self.barrel_capacity - int(data["water_uses"]),
             )
             self.player.bucket_water_uses -= moved
             data["water_uses"] = int(data["water_uses"]) + moved
-            barrel.state = json.dumps(data, separators=(",", ":"))
+            self.sync_barrel_sprite_state(data)
+            barrel.state = data
             self.log(f"Added {moved} water uses to the barrel.")
-            if int(data["water_uses"]) >= BARREL_CAPACITY:
+            if int(data["water_uses"]) >= self.barrel_capacity:
                 self.barrel_fill_job = None
                 self.log("The barrel is full.")
             else:
@@ -1750,15 +2582,21 @@ class Game:
         job = self.field_water_job
         if job is None:
             return False
+        if not self.player.has_bucket or self.bucket_capacity <= 0:
+            self.field_water_job = None
+            self.navigation_path = []
+            self.walk_target = None
+            self.log("The ruined bucket cannot hold water.")
+            return True
         while job.crop_points:
             point = job.crop_points[0]
             located = self.map.tile_map.tile_at_world(*point)
-            state = (
-                self.map.tile_states.get((located[0], located[1]))
+            crop = (
+                self.crop_at_tile(located[0], located[1])
                 if located is not None
                 else None
             )
-            if state is not None and state.crop is not None and not state.watered:
+            if crop is not None and float(crop.state.get("water", 0.0)) < 100.0:
                 break
             job.crop_points.pop(0)
         if not job.crop_points:
@@ -1789,26 +2627,28 @@ class Game:
             self.field_water_job = None
             first_area = job.source_areas[0]
             center = ((first_area[0] + first_area[2]) / 2, (first_area[1] + first_area[3]) / 2)
-            self.visit_failed_memory(center)
+            self.visit_failed_memory(
+                center, "Water Crops", "there is no reachable water source here"
+            )
             return True
         if self.navigation_path:
             if not self.move_along_path(dt):
                 job.phase = "choose"
             return True
         if job.phase == "source":
-            self.player.bucket_water_uses = BUCKET_CAPACITY
+            self.player.bucket_water_uses = self.bucket_capacity
             self.log("Refilled the bucket for the field.")
             job.phase = "choose"
             return True
         if job.phase == "crop" and job.current_crop is not None:
             located = self.map.tile_map.tile_at_world(*job.current_crop)
-            state = (
-                self.map.tile_states.get((located[0], located[1]))
+            crop = (
+                self.crop_at_tile(located[0], located[1])
                 if located is not None
                 else None
             )
-            if state is not None and state.crop is not None and not state.watered:
-                state.watered = True
+            if crop is not None and float(crop.state.get("water", 0.0)) < 100.0:
+                crop.state["water"] = 100.0
                 self.player.bucket_water_uses -= 1
                 self.log("Watered a selected crop.")
             job.crop_points.pop(0)
@@ -1818,20 +2658,50 @@ class Game:
         return True
 
     def update(self, dt: float) -> None:
-        real_dt = dt
+        if self.adjusting_memory:
+            return
         if self.day_transition_phase is not None:
             self.update_day_transition(dt)
             return
+        if self.day.mode is Mode.MORNING and self.auto_cheat_memory:
+            self.choose_morning_option("Replay Memory and Sleep")
         if self.day.mode is Mode.DIRECT and not self.has_queued_command():
             self.simulation_paused = True
-        simulation_dt = (
-            0.0
-            if self.day.mode is Mode.MORNING or self.simulation_paused
-            else dt * self.time_speed
-        )
-        self.advance_crop_growth(simulation_dt * GAME_MINUTES_PER_REAL_SECOND)
+        if self.thought_bubble_timer > 0.0:
+            self.thought_bubble_timer = max(0.0, self.thought_bubble_timer - dt)
+            if self.thought_bubble_timer == 0.0:
+                self.thought_bubble_text = None
+        if self.day.mode is Mode.MORNING or self.simulation_paused:
+            self.simulation_step_accumulator = 0.0
+            self._update_simulation_tick(0.0)
+            return
+        self.simulation_step_accumulator += dt * self.time_speed
+        processed_tick = False
+        while (
+            self.simulation_step_accumulator + 1e-12
+            >= FIXED_SIMULATION_TICK_SECONDS
+        ):
+            self.simulation_step_accumulator -= FIXED_SIMULATION_TICK_SECONDS
+            self._update_simulation_tick(FIXED_SIMULATION_TICK_SECONDS)
+            processed_tick = True
+            if self.day.mode is Mode.DIRECT and not self.has_queued_command():
+                self.simulation_paused = True
+            if (
+                self.day_transition_phase is not None
+                or self.day.mode is Mode.MORNING
+                or self.simulation_paused
+            ):
+                self.simulation_step_accumulator = 0.0
+                break
+        if not processed_tick:
+            self._update_simulation_tick(0.0)
+
+    def _update_simulation_tick(self, dt: float) -> None:
+        if self.pending_empty_area_memory and not self.navigation_path:
+            self.show_empty_area_memory_thought()
+        self.advance_crop_growth(dt * GAME_MINUTES_PER_REAL_SECOND)
         if self.day.mode is not Mode.MORNING:
-            self.time_accumulator += simulation_dt * GAME_MINUTES_PER_REAL_SECOND
+            self.time_accumulator += dt * GAME_MINUTES_PER_REAL_SECOND
             elapsed_minutes = int(self.time_accumulator)
             if elapsed_minutes:
                 self.time_accumulator -= elapsed_minutes
@@ -1839,15 +2709,6 @@ class Game:
                 self.day.current_time_minutes = min(
                     end_of_day, self.day.current_time_minutes + elapsed_minutes
                 )
-        dt = simulation_dt
-        if self.thought_bubble_timer > 0.0:
-            self.thought_bubble_timer = max(0.0, self.thought_bubble_timer - real_dt)
-            if self.thought_bubble_timer == 0.0:
-                self.thought_bubble_text = None
-            return
-        if self.pending_empty_area_memory and not self.navigation_path:
-            self.show_empty_area_memory_thought()
-            return
         if self.update_barrel_fill_job(dt):
             return
         if self.update_field_water_job(dt):
@@ -1910,17 +2771,32 @@ class Game:
             timed_duration = 0.0
             progress_message = ""
             if target.action == "Till Grassland":
-                timed_duration = tilling_duration_seconds(self.player.hoe_quality)
+                timed_duration = (
+                    tilling_duration_seconds(self.player.hoe_quality)
+                    * target.work_fraction
+                )
                 progress_message = "Tilling the ground..."
             elif target.action == "Plant Wheat":
                 timed_duration = planting_duration_seconds(self.player.has_basket)
                 progress_message = "Planting wheat..."
             elif target.action == "Harvest Wheat":
-                timed_duration = harvesting_duration_seconds(self.player.has_basket)
+                interaction = self.map.object_types["crop"].form_definition(
+                    "mature", "wheat"
+                ).interactions["Harvest Wheat"]
+                duration = interaction["duration_seconds"]
+                duration_key = (
+                    "with_basket"
+                    if self.player.has_basket and "with_basket" in duration
+                    else "base"
+                )
+                timed_duration = float(duration[duration_key])
                 progress_message = "Harvesting wheat..."
-            elif target.action == "Build Barrel":
-                timed_duration = 4.0
-                progress_message = "Building a barrel..."
+            elif target.action in BUILD_COMMAND_TYPES:
+                build_type = BUILD_COMMAND_TYPES[target.action]
+                timed_duration = self.map.object_types[
+                    build_type
+                ].form_definition().build_duration_seconds
+                progress_message = f"Building a {build_type.replace('_', ' ')}..."
             if timed_duration:
                 if self.area_job_timer == 0.0:
                     self.log(progress_message)
@@ -1929,7 +2805,7 @@ class Game:
                     return
             if target.action == "Gather Water":
                 if self.player.has_bucket and not self.player.bucket_filled:
-                    self.player.bucket_water_uses = BUCKET_CAPACITY
+                    self.player.bucket_water_uses = self.bucket_capacity
                     self.log("Filled the wooden bucket with 5 uses of water.")
             elif target.action == "Till Grassland" and self.player.carrying_hoe:
                 located = self.map.tile_map.tile_at_world(*target.point)
@@ -1938,58 +2814,87 @@ class Game:
                     state = self.map.tile_states.setdefault(
                         (column, row), LevelTileState(column=column, row=row)
                     )
-                    state.till_count += 1
+                    if state.persistence_modifier is None:
+                        state.persistence_modifier = self.persistence_modifier(
+                            f"tile:{column}:{row}",
+                            self.map.tile_persistence_modifier_range,
+                        )
+                    state.till_percentage = min(
+                        100.0,
+                        state.till_percentage
+                        + self.map.till_progress_per_action
+                        * state.persistence_modifier
+                        * target.work_fraction,
+                        # A time-limited command may end partway through one
+                        # ordinary till action; preserve that proportional work.
+                    )
                     state.tilled_today = True
-                    tile.kind = TileKind.SOIL
-                    self.log("Tilled grassland into soil.")
+                    if state.till_percentage >= 100.0:
+                        state.kind_override = TileKind.SOIL.value
+                        state.soil_persistence_percentage = min(
+                            100.0,
+                            state.soil_persistence_percentage
+                            + self.map.soil_persistence_gain
+                            * state.persistence_modifier,
+                        )
+                        tile.kind = TileKind.SOIL
+                        self.log(
+                            "The fully tilled grassland became soil "
+                            f"({state.soil_persistence_percentage:.1f}% remembered)."
+                        )
+                    else:
+                        self.log(
+                            f"Tilled the grassland to {state.till_percentage:.1f}%."
+                        )
             elif target.action == "Plant Wheat":
                 located = self.map.tile_map.tile_at_world(*target.point)
                 if located is not None and located[2].kind is TileKind.SOIL and self.player.inventory["seed"] > 0:
-                    column, row, tile = located
-                    state = self.map.tile_states.get((column, row))
-                    if state is not None and state.crop is None:
-                        state.crop = "wheat"
-                        state.crop_growth = 0.0
-                        tile.properties.append("crop:wheat")
+                    column, row, _tile = located
+                    if self.crop_at_tile(column, row) is None:
+                        self.plant_crop(column, row, "wheat")
                         self.player.inventory["seed"] -= 1
                         self.log("Planted wheat seed.")
             elif target.action == "Water Crops" and self.player.bucket_filled:
                 located = self.map.tile_map.tile_at_world(*target.point)
                 if located is not None:
-                    column, row, tile = located
-                    state = self.map.tile_states.get((column, row))
-                    if state is not None and state.crop is not None and not state.watered:
-                        state.watered = True
+                    column, row, _tile = located
+                    crop = self.crop_at_tile(column, row)
+                    if (
+                        crop is not None
+                        and float(crop.state.get("water", 0.0)) < 100.0
+                    ):
+                        crop.state["water"] = 100.0
                         self.player.bucket_water_uses -= 1
-                        tile.properties = [
-                            prop for prop in tile.properties if not prop.startswith("crop_growth:")
-                        ]
-                        tile.properties.append(f"crop_growth:{state.crop_growth}")
                         self.log("Watered the wheat; it will now grow much faster.")
-            elif target.action == "Build Barrel":
-                if self.can_afford_build("barrel"):
-                    self.build_barrel(target.placement_point or target.point)
+            elif target.action in BUILD_COMMAND_TYPES:
+                build_type = BUILD_COMMAND_TYPES[target.action]
+                if self.can_afford_build(build_type):
+                    if build_type == "barrel":
+                        self.build_barrel(target.placement_point or target.point)
+                    else:
+                        self.build_fixed_object(
+                            build_type, target.placement_point or target.point
+                        )
+            elif target.action == "Drop Bucket":
+                self.drop_bucket(target.point)
             elif target.action == "Tend Plant":
                 located = self.map.tile_map.tile_at_world(*target.point)
                 if located is not None:
-                    state = self.map.tile_states.get((located[0], located[1]))
-                    if state is not None and state.crop is not None and not state.tended:
-                        state.tended = True
+                    crop = self.crop_at_tile(located[0], located[1])
+                    if (
+                        crop is not None
+                        and float(crop.state.get("tended", 0.0)) < 100.0
+                    ):
+                        crop.state["tended"] = 100.0
                         self.log("Tended the plant; it will grow a little faster.")
             elif target.action == "Harvest Wheat":
                 located = self.map.tile_map.tile_at_world(*target.point)
                 if located is not None:
-                    column, row, tile = located
-                    state = self.map.tile_states.get((column, row))
-                    if state is not None and state.crop == "wheat" and state.crop_growth >= 1.0:
-                        state.crop = None
-                        state.crop_growth = 0.0
-                        tile.properties = [
-                            prop
-                            for prop in tile.properties
-                            if not prop.startswith("crop:") and not prop.startswith("crop_growth:")
-                        ]
-                        self.player.inventory["wheat"] += 3
+                    column, row, _tile = located
+                    crop = self.crop_at_tile(column, row)
+                    if crop is not None and crop.variant == "wheat" and crop.form == "mature":
+                        self.grant_interaction_loot(crop, "Harvest Wheat")
+                        crop.active = False
                         self.log("Harvested 3 wheat.")
             self.pending_area_target = None
             self.area_job_timer = 0.0
@@ -2008,12 +2913,17 @@ class Game:
             if self.day.replay_index >= len(self.day.remembered_routine):
                 if self.replay_outcome == "sleep":
                     bed = self.object_of_type("bed")
-                    self.queue_job(
+                    sleep_queued = self.queue_job(
                         bed.object_id,
                         "Sleep",
                         record=False,
                         advances_replay=False,
                     )
+                    if not sleep_queued and self.auto_cheat_memory:
+                        self.log(
+                            "Automatic memory could not reach the bed; forcing the cheat-mode dawn reset."
+                        )
+                        self.begin_day_transition()
                 else:
                     self.day.mode = Mode.DIRECT
                     if self.replay_outcome == "explore":
@@ -2038,14 +2948,34 @@ class Game:
                     )
                 elif step.action == "Fill Barrel" and step.area_bounds is not None:
                     self.day.replay_index += 1
-                    if step.target_id is None:
-                        self.visit_failed_memory(step.target_point)
+                    build_memory_id = self.build_memory_id_for_step(step)
+                    remembered_object = (
+                        self.object_for_build_memory(build_memory_id)
+                        if build_memory_id is not None
+                        else None
+                    )
+                    target_id = (
+                        remembered_object.object_id
+                        if remembered_object is not None
+                        else step.target_id if build_memory_id is None else None
+                    )
+                    if target_id is None or target_id not in self.objects:
+                        self.visit_failed_memory(
+                            step.target_point,
+                            step.action,
+                            "the remembered barrel has not been built",
+                        )
                     else:
                         self.queue_barrel_fill_command(
-                            step.target_id,
+                            target_id,
                             step.source_areas or (step.area_bounds,),
                             record=False,
                         )
+                elif step.nearest_to_player and step.action in AREA_COMMAND_TYPES:
+                    self.day.replay_index += 1
+                    self.queue_nearest_gather_command(
+                        step.action, step.quantity or 1, record=False
+                    )
                 elif step.area_bounds is not None:
                     self.day.replay_index += 1
                     self.queue_area_command(
@@ -2054,6 +2984,8 @@ class Game:
                         step.quantity or 1,
                         record=False,
                         target_areas=step.target_areas,
+                        max_game_minutes=step.max_game_minutes,
+                        till_until_done=step.till_until_done,
                     )
                 else:
                     target_id = self.resolve_routine_target(step)
@@ -2063,7 +2995,9 @@ class Game:
                         original = self.objects.get(step.target_id)
                         self.visit_failed_memory(
                             step.target_point
-                            or (original.center if original is not None else None)
+                            or (original.center if original is not None else None),
+                            step.action,
+                            "the remembered target is no longer available",
                         )
                     else:
                         self.queue_job(target_id, step.action, record=False)
@@ -2105,33 +3039,25 @@ class Game:
         obj = self.objects[job.target_id]
         action = job.action
         if action == "Gather":
-            item_by_kind = {
-                ObjectKind.STICK: "stick",
-                ObjectKind.STONE: "stone",
-                ObjectKind.GRASS: "fiber",
-                ObjectKind.WILD_GRAIN: "seed",
-                ObjectKind.BERRY_BUSH: "berries",
-            }
-            item = item_by_kind[obj.kind]
-            self.player.inventory[item] += 1
+            loot = self.grant_interaction_loot(obj, action)
             obj.active = False
-            self.log(f"Gathered {item}.")
+            self.log(f"Gathered {', '.join(loot)}.")
         elif action == "Harvest Berries":
-            self.player.inventory["berries"] += 1
+            self.grant_interaction_loot(obj, action)
+            self.create_interaction_objects(obj, action)
             obj.active = False
             self.log("Harvested berries.")
         elif action == "Pull Berry Bush":
-            self.player.inventory["berries"] += 1
-            self.player.inventory["fiber"] += 1
-            self.player.inventory["stick"] += 1
+            self.grant_interaction_loot(obj, action)
+            self.create_interaction_objects(obj, action)
             obj.active = False
             rebuild_tile_map(self.map)
             self.log("Pulled the berry bush and gathered berries, fiber, and a branch.")
         elif action == "Break Off Branch":
             state = tree_state_data(obj.state)
-            if state["form"] == "stump" or state["branch_taken"]:
+            if obj.form == "stump" or state["branch_taken"]:
                 return
-            self.player.inventory["stick"] += 1
+            self.grant_interaction_loot(obj, action)
             state["branch_taken"] = True
             obj.state = encode_tree_state(state)
             self.log("Broke a branch from the tree.")
@@ -2139,62 +3065,59 @@ class Game:
             if not self.player.carrying_axe or not obj.active:
                 return
             state = tree_state_data(obj.state)
-            state["form"] = "stump"
             state["branch_taken"] = True
             obj.state = encode_tree_state(state)
-            self.player.inventory["wood"] += 3
+            self.grant_interaction_loot(obj, action)
+            result_form = str(
+                self.interaction_definition(obj, action).get(
+                    "result_form", obj.form
+                )
+            )
+            self.apply_object_form(obj, result_form)
             rebuild_tile_map(self.map)
             self.log("Chopped down the tree and gathered 3 wood.")
         elif action == "Craft Crude Hoe":
-            if not can_craft_hoe(self.player):
-                self.log("Need 1 stick, 1 stone, and 1 fiber.")
-                return
-            for item in ("stick", "stone", "fiber"):
-                self.player.inventory[item] -= 1
+            self.consume_interaction_cost(obj, action)
             self.player.has_hoe = True
             self.player.carrying_hoe = True
             self.player.hoe_quality = 20
             self.unlock("First Tool")
             self.log("Crafted and equipped a crude hoe.")
         elif action == "Craft Crude Axe":
-            if not can_craft_axe(self.player):
-                self.log("Need 1 stick, 2 stone, and 1 fiber.")
-                return
-            self.player.inventory["stick"] -= 1
-            self.player.inventory["stone"] -= 2
-            self.player.inventory["fiber"] -= 1
+            self.consume_interaction_cost(obj, action)
+            created = self.interaction_definition(obj, action).get("creates", {})
+            if created:
+                self.create_carried_object(str(created["type"]))
             self.player.has_axe = True
             self.player.carrying_axe = True
             self.log("Crafted and equipped a crude axe.")
         elif action == "Craft Wooden Bucket":
-            if not can_craft_bucket(self.player):
-                self.log("Need 2 wood and 1 fiber.")
-                return
-            self.player.inventory["wood"] -= 2
-            self.player.inventory["fiber"] -= 1
-            self.player.has_bucket = True
-            self.player.bucket_water_uses = 0
+            self.consume_interaction_cost(obj, action)
+            created = self.interaction_definition(obj, action).get("creates", {})
+            self.create_carried_object(str(created["type"]), quality=50)
             self.log("Crafted a wooden bucket.")
         elif action in {"Pour Water Into Barrel", "Fill Bucket From Barrel"}:
             data = self.barrel_state(obj)
             barrel_water = int(data["water_uses"])
             if action == "Pour Water Into Barrel":
-                moved = min(self.player.bucket_water_uses, BARREL_CAPACITY - barrel_water)
+                moved = min(self.player.bucket_water_uses, self.barrel_capacity - barrel_water)
                 self.player.bucket_water_uses -= moved
                 data["water_uses"] = barrel_water + moved
                 self.log(f"Poured {moved} use{'s' if moved != 1 else ''} into the barrel.")
             else:
-                moved = min(BUCKET_CAPACITY - self.player.bucket_water_uses, barrel_water)
+                moved = min(
+                    self.bucket_capacity - self.player.bucket_water_uses,
+                    barrel_water,
+                )
                 self.player.bucket_water_uses += moved
                 data["water_uses"] = barrel_water - moved
                 self.log(f"Took {moved} use{'s' if moved != 1 else ''} from the barrel.")
-            obj.state = json.dumps(data, separators=(",", ":"))
+            self.sync_barrel_sprite_state(data)
+            obj.state = data
         elif action == "Weave Fiber Basket":
-            if not can_craft_basket(self.player):
-                self.log("Need 3 fiber.")
-                return
-            self.player.inventory["fiber"] -= 3
-            self.player.has_basket = True
+            self.consume_interaction_cost(obj, action)
+            created = self.interaction_definition(obj, action).get("creates", {})
+            self.create_carried_object(str(created["type"]))
             self.log("Wove a fiber basket.")
         elif action == "Store Hoe":
             self.player.carrying_hoe = False
@@ -2212,86 +3135,317 @@ class Game:
             self.player.carrying_axe = True
             self.record_tool_taken(obj, "axe")
             self.log("Took the crude axe.")
-        elif action == "Prepare Soil":
-            obj.state = "prepared"
-            self.log("Prepared the old field.")
-        elif action == "Plant Wheat":
-            self.player.inventory["seed"] -= 1
-            obj.state = "planted"
-            self.log("Planted wild wheat seed.")
-        elif action == "Whisper to Wheat":
-            obj.state = "mature"
-            self.log("The wheat remembers how to grow.")
+        elif action == "Pick Up":
+            obj.container = "player"
+            self.player.carried_objects.append(obj)
+            rebuild_tile_map(self.map)
+            self.log(f"Picked up the {obj.name.lower()}.")
+        elif action == "Store Bucket":
+            bucket = self.player.bucket
+            if bucket is not None:
+                bucket.container = f"object:{obj.object_id}"
+                self.player.carried_objects.remove(bucket)
+                obj.state.setdefault("bucket_ids", []).append(bucket.object_id)
+                rebuild_tile_map(self.map)
+                self.log("Stored the wooden bucket.")
+        elif action == "Take Bucket":
+            bucket_ids = obj.state.get("bucket_ids", [])
+            if bucket_ids:
+                bucket = self.objects[int(bucket_ids.pop(0))]
+                bucket.container = "player"
+                self.player.carried_objects.append(bucket)
+                self.log("Took the wooden bucket.")
+        elif action == "Store Food":
+            food = next(
+                (
+                    carried
+                    for carried in self.player.carried_objects
+                    if carried.active and "edible" in carried.traits
+                ),
+                None,
+            )
+            if food is None:
+                return
+            food.container = f"object:{obj.object_id}"
+            self.player.carried_objects.remove(food)
+            obj.state.setdefault("food_ids", []).append(food.object_id)
+            self.log(f"Stored the {food.name.lower()} in the cupboard.")
+        elif action == "Take Food":
+            food_ids = obj.state.setdefault("food_ids", [])
+            if not food_ids:
+                return
+            food = self.objects.get(int(food_ids.pop(0)))
+            if food is None or not food.active:
+                return
+            food.container = "player"
+            self.player.carried_objects.append(food)
+            self.log(f"Took the {food.name.lower()} from the cupboard.")
         elif action == "Harvest Wheat":
-            obj.state = "wild"
-            self.player.inventory["wheat"] += 3
+            grains_before = self.player.inventory["grains"]
+            self.grant_interaction_loot(obj, action)
+            grains_gathered = self.player.inventory["grains"] - grains_before
+            obj.active = False
+            located = self.map.tile_map.tile_at_world(*obj.center)
             self.unlock("First Harvest")
-            self.log("Harvested 3 wheat.")
-        elif action == "Cook Wheat":
-            self.player.inventory["wheat"] -= 1
-            self.player.meal_ready = True
-            self.log("Cooked a simple wheat meal.")
-        elif action == "Eat Meal":
-            self.player.meal_ready = False
-            self.player.hunger = min(100, self.player.hunger + 60)
-            self.log("Ate at the broken table.")
+            self.log(f"Harvested {grains_gathered} grains.")
+        elif action == "Prepare Porridge":
+            self.consume_interaction_cost(obj, action)
+            definition = self.interaction_definition(obj, action)
+            self.player.bucket_water_uses -= int(
+                definition.get("water_cost", 0)
+            )
+            created = definition.get("creates", {})
+            self.create_carried_object(
+                str(created["type"]),
+                quality=int(created.get("quality", 10)),
+            )
+            self.log("Prepared a terrible bowl of porridge.")
+        elif action in {"Eat Porridge", "Eat Berries"}:
+            definition = self.interaction_definition(obj, action)
+            consumed_type = str(
+                definition.get("consumes", {}).get("type", "")
+            )
+            food = next(
+                (
+                    carried
+                    for carried in self.player.carried_objects
+                    if carried.active
+                    and "edible" in carried.traits
+                    and carried.type_id == consumed_type
+                ),
+                None,
+            )
+            if food is None:
+                return
+            self.player.hunger = min(100, self.player.hunger + food.nutrition)
+            food.active = False
+            food.container = None
+            self.player.carried_objects.remove(food)
+            self.log(
+                f"Ate the {food.name.lower()} at the table "
+                f"(+{food.nutrition} nutrition)."
+            )
         elif action == "Sleep":
             self.unlock("Homecoming")
             self.begin_day_transition()
 
+    def interaction_definition(
+        self, obj: WorldObject, action: str
+    ) -> dict[str, object]:
+        return obj.interactions.get(action, {})
+
+    def create_carried_object(
+        self, type_id: str, *, quality: int = 20
+    ) -> WorldObject:
+        definition = self.map.object_types[type_id]
+        form = definition.form_definition()
+        tile_size = self.map.tile_map.tile_size
+        created = WorldObject(
+            object_id=max(self.objects, default=0) + 1,
+            name=form.name or definition.name_for(definition.default_variant),
+            kind=definition.kind,
+            x=round(self.player.x - form.footprint[0] * tile_size / 2),
+            y=round(self.player.y - form.footprint[1] * tile_size / 2),
+            width=form.footprint[0] * tile_size,
+            height=form.footprint[1] * tile_size,
+            state={"water_uses": 0} if "water" in form.capacity else {},
+            blocks_movement=form.blocks_movement,
+            blocks_vision=form.blocks_vision,
+            mobility=form.mobility,
+            traits=form.traits,
+            descriptions=dict(form.descriptions),
+            interactions={
+                action: dict(details)
+                for action, details in form.interactions.items()
+            },
+            capacity=form.capacity_for(quality),
+            nutrition=form.nutrition,
+            type_id=type_id,
+            quality=quality,
+            variant=definition.default_variant,
+            form=definition.default_form,
+            container="player",
+        )
+        self.objects[created.object_id] = created
+        self.player.carried_objects.append(created)
+        return created
+
+    def create_interaction_objects(
+        self, obj: WorldObject, action: str
+    ) -> list[WorldObject]:
+        creates = self.interaction_definition(obj, action).get("creates", {})
+        if not isinstance(creates, dict) or not creates.get("type"):
+            return []
+        quantity = max(0, int(creates.get("quantity", 1)))
+        quality = max(1, min(100, int(creates.get("quality", obj.quality))))
+        return [
+            self.create_carried_object(str(creates["type"]), quality=quality)
+            for _ in range(quantity)
+        ]
+
+    def drop_bucket(self, point: tuple[float, float]) -> None:
+        bucket = self.player.bucket
+        if bucket is None:
+            return
+        bucket.x = round(point[0] - bucket.width / 2)
+        bucket.y = round(point[1] - bucket.height / 2)
+        bucket.container = None
+        self.player.carried_objects.remove(bucket)
+        rebuild_tile_map(self.map)
+        self.log("Dropped the wooden bucket.")
+
+    def consume_interaction_cost(self, obj: WorldObject, action: str) -> None:
+        cost = self.interaction_definition(obj, action).get("cost", {})
+        for item, amount in cost.items():
+            self.player.inventory[item] -= int(amount)
+
+    def grant_interaction_loot(self, obj: WorldObject, action: str) -> list[str]:
+        loot = self.interaction_definition(obj, action).get("loot", {})
+        if "default" in loot or (
+            obj.variant is not None and obj.variant in loot
+        ):
+            loot = loot.get(obj.variant, loot.get("default", {}))
+        granted: list[str] = []
+        for item, amount in loot.items():
+            if isinstance(amount, list) and len(amount) == 2:
+                granted_amount = random.randint(int(amount[0]), int(amount[1]))
+            else:
+                granted_amount = int(amount)
+            self.player.inventory[item] += granted_amount
+            granted.append(item)
+        return granted
+
     def barrel_state(self, barrel: WorldObject) -> dict[str, object]:
-        try:
-            loaded = json.loads(barrel.state) if barrel.state else {}
-        except (json.JSONDecodeError, TypeError):
-            loaded = {}
+        loaded = barrel.state
         memory = loaded.get("water_memory", {}) if isinstance(loaded, dict) else {}
-        return {
-            "water_uses": max(0, min(BARREL_CAPACITY, int(loaded.get("water_uses", 0)))),
+        normalized = {
+            "water_uses": max(0, min(self.barrel_capacity, int(loaded.get("water_uses", 0)))),
             "build_count": max(0, int(loaded.get("build_count", 0))),
             "built_today": bool(loaded.get("built_today", False)),
+            "build_memory_id": loaded.get("build_memory_id"),
+            "persistence_modifier": (
+                float(loaded["persistence_modifier"])
+                if loaded.get("persistence_modifier") is not None
+                else None
+            ),
             "water_memory": {
-                "observed": max(0, min(BARREL_CAPACITY, int(memory.get("observed", 0)))),
+                "observed": max(0, min(self.barrel_capacity, int(memory.get("observed", 0)))),
                 "count": max(0, int(memory.get("count", 0))),
-                "remembered": max(0, min(BARREL_CAPACITY, int(memory.get("remembered", 0)))),
+                "remembered": max(0, min(self.barrel_capacity, int(memory.get("remembered", 0)))),
+                "persistence_modifier": (
+                    float(memory["persistence_modifier"])
+                    if memory.get("persistence_modifier") is not None
+                    else None
+                ),
             },
         }
+        self.sync_barrel_sprite_state(normalized)
+        return normalized
 
-    def persistence_chance_text(self, count: int) -> str:
-        chance = min(1.0, self.map.permanent_soil_chance_per_till * count)
-        return f"{chance * 100:.3f}%"
+    @staticmethod
+    def sync_barrel_sprite_state(data: dict[str, object]) -> None:
+        if int(data.get("water_uses", 0)) == 0:
+            data["sprite_state"] = "empty"
+        else:
+            data.pop("sprite_state", None)
+
+    def sync_all_barrel_sprite_states(self) -> None:
+        for barrel in (
+            obj for obj in self.objects.values() if obj.kind is ObjectKind.BARREL
+        ):
+            barrel.state = self.barrel_state(barrel)
+
+    @staticmethod
+    def persistence_modifier(
+        identity: str, modifier_range: tuple[float, float]
+    ) -> float:
+        return random.Random(
+            f"remembering:persistence-modifier:{identity}"
+        ).uniform(*modifier_range)
+
+    @staticmethod
+    def policy_chance(count: int, modifier: float, policy) -> float:
+        return min(1.0, policy.chance_per_count * count * modifier)
+
+    def object_persistence_policy(
+        self, obj: WorldObject, policy_id: str, form_id: str | None = None
+    ):
+        definition = self.map.object_types[obj.type_id]
+        return definition.form_definition(form_id or obj.form).persistence.get(policy_id)
 
     def object_persistence_details(self, obj: WorldObject) -> list[str]:
         if obj.kind is ObjectKind.TREE:
             state = tree_state_data(obj.state)
             count = int(state["stump_memory_count"])
-            if state["form"] == "stump":
+            if obj.form == "stump":
                 count += 1
+            policy = self.object_persistence_policy(obj, "object", "stump")
+            if policy is None:
+                return ["Persistence: cannot develop"]
+            modifier = state["persistence_modifier"] or self.persistence_modifier(
+                f"tree:{obj.object_id}:stump", policy.modifier_range
+            )
             return [
                 f"Stump memory count: {count}",
-                f"Persistence chance: {self.persistence_chance_text(count)}",
+                f"Persistence affinity: {modifier:.2f}x",
+                f"Persistence chance: {self.policy_chance(count, modifier, policy) * 100:.3f}%",
             ]
         if obj.kind is ObjectKind.BARREL:
             state = self.barrel_state(obj)
+            policy_id = "water_level" if obj.persistent else "object"
+            policy = self.object_persistence_policy(obj, policy_id)
+            if policy is None:
+                return ["Persistence: cannot develop"]
             if not obj.persistent:
                 count = int(state["build_count"]) + (1 if state["built_today"] else 0)
+                modifier = float(
+                    state.get("persistence_modifier")
+                    or self.persistence_modifier(
+                        str(state.get("build_memory_id") or f"barrel:{obj.object_id}"),
+                        policy.modifier_range,
+                    )
+                )
                 return [
                     f"Barrel memory count: {count}",
-                    f"Persistence chance: {self.persistence_chance_text(count)}",
+                    f"Persistence affinity: {modifier:.2f}x",
+                    f"Persistence chance: {self.policy_chance(count, modifier, policy) * 100:.3f}%",
                 ]
             memory = state["water_memory"]
             count = int(memory["count"]) + 1
+            modifier = float(
+                memory.get("persistence_modifier")
+                or self.persistence_modifier(
+                    f"{state.get('build_memory_id')}:water", policy.modifier_range
+                )
+            )
             return [
                 "Barrel persistence: remembered",
                 f"Water-level count: {count}",
-                f"Level-memory chance: {self.persistence_chance_text(count)}",
-                f"Remembered water: {memory['remembered']}/{BARREL_CAPACITY}",
+                f"Water affinity: {modifier:.2f}x",
+                f"Level-memory chance: {self.policy_chance(count, modifier, policy) * 100:.3f}%",
+                f"Remembered water: {memory['remembered']}/{self.barrel_capacity}",
             ]
         if obj.kind is ObjectKind.TOOL_STORAGE:
+            policy = self.object_persistence_policy(obj, "stored_tools")
+            if policy is None:
+                return ["Persistence: cannot develop"]
             lines = []
             for tool, progress in self.storage_memories.get(obj.object_id, {}).items():
                 count = int(progress["store_count"]) + (1 if progress["present"] else 0)
-                status = "remembered" if progress["persistent"] else self.persistence_chance_text(count)
-                lines.append(f"{tool.title()}: {count} ({status})")
+                modifier = float(
+                    progress.get("persistence_modifier")
+                    or self.persistence_modifier(
+                        f"storage:{obj.object_id}:{tool}", policy.modifier_range
+                    )
+                )
+                status = (
+                    "remembered"
+                    if progress["persistent"]
+                    else f"{self.policy_chance(count, modifier, policy) * 100:.3f}%"
+                )
+                lines.append(
+                    f"{tool.title()}: {count}, {modifier:.2f}x affinity ({status})"
+                )
             return lines
         return ["Persistence: remembered"] if obj.persistent else ["Persistence: not remembered"]
 
@@ -2299,15 +3453,64 @@ class Game:
         state = self.map.tile_states.get((column, row))
         if state is None:
             return ["Persistence chance: 0.000%"]
-        if state.permanent_kind is not None:
-            return ["Terrain persistence: remembered"]
+        if state.kind_override == TileKind.SOIL.value:
+            return [
+                "Terrain: soil",
+                "Till progress: 100.0%",
+                (
+                    "Chance to remain soil tonight: "
+                    f"{state.soil_persistence_percentage:.1f}%"
+                ),
+            ]
         return [
-            f"Till memory count: {state.till_count}",
-            f"Persistence chance: {self.persistence_chance_text(state.till_count)}",
+            f"Till progress: {state.till_percentage:.1f}%",
+            (
+                "Remembered soil chance: "
+                f"{state.soil_persistence_percentage:.1f}%"
+            ),
+            f"Persistence affinity: {(state.persistence_modifier or 1.0):.2f}x",
+            (
+                "Progress per till: "
+                f"{self.map.till_progress_per_action * (state.persistence_modifier or 1.0):.3f}%"
+            ),
         ]
 
     def build_cost(self, type_id: str) -> dict[str, int]:
-        return dict(self.map.object_types[type_id].build_cost)
+        definition = self.map.object_types[type_id]
+        return dict(definition.form_definition().build_cost)
+
+    @property
+    def barrel_capacity(self) -> int:
+        return self.map.object_types["barrel"].form_definition().capacity_for(100)["water"]
+
+    @property
+    def bucket_capacity(self) -> int:
+        quality = self.player.bucket.quality if self.player.bucket is not None else 100
+        return self.map.object_types["bucket"].form_definition().capacity_for(quality)["water"]
+
+    def apply_object_form(self, obj: WorldObject, form_id: str) -> None:
+        definition = self.map.object_types[obj.type_id]
+        form = definition.form_definition(form_id, obj.variant)
+        obj.form = form_id
+        obj.name = form.name or definition.name_for(obj.variant)
+        obj.descriptions = dict(form.descriptions)
+        obj.interactions = {
+            action: dict(details) for action, details in form.interactions.items()
+        }
+        obj.capacity = form.capacity_for(obj.quality)
+        obj.nutrition = form.nutrition
+        obj.blocks_movement = form.blocks_movement
+        obj.blocks_vision = form.blocks_vision
+        obj.mobility = form.mobility
+        obj.traits = form.traits
+        width, height = (
+            form.footprint[0] * self.map.tile_map.tile_size,
+            form.footprint[1] * self.map.tile_map.tile_size,
+        )
+        if obj.orientation == "N/S":
+            width, height = height, width
+        obj.width = width
+        obj.height = height
 
     def can_afford_build(self, type_id: str) -> bool:
         cost = self.build_cost(type_id)
@@ -2317,45 +3520,161 @@ class Game:
 
     def build_barrel(self, point: tuple[float, float]) -> None:
         definition = self.map.object_types["barrel"]
-        existing = next(
-            (
-                obj for obj in self.objects.values()
-                if obj.type_id == "barrel" and not obj.active
-                and math.dist(obj.center, point) < self.map.tile_map.tile_size / 2
-            ),
-            None,
-        )
+        form = definition.form_definition()
+        width = form.footprint[0] * self.map.tile_map.tile_size
+        height = form.footprint[1] * self.map.tile_map.tile_size
+        column, row, _ = self.map.tile_map.tile_at_world(*point)
+        memory_id = f"barrel:{column}:{row}"
+        memory = self.build_memories.get(memory_id)
+        if memory is None:
+            policy = form.persistence.get("object")
+            memory = BuildMemory(
+                memory_id,
+                "barrel",
+                column,
+                row,
+                persistence_modifier=(
+                    self.persistence_modifier(memory_id, policy.modifier_range)
+                    if policy is not None
+                    else None
+                ),
+            )
+            self.build_memories[memory_id] = memory
+        existing = self.object_for_build_memory(memory_id)
         if existing is None:
             object_id = max(self.objects, default=0) + 1
-            x = round(point[0] - definition.width / 2)
-            y = round(point[1] - definition.height / 2)
+            x = round(point[0] - width / 2)
+            y = round(point[1] - height / 2)
             existing = WorldObject(
                 object_id,
                 definition.name,
                 definition.kind,
                 x,
                 y,
-                definition.width,
-                definition.height,
-                state="",
-                blocks_movement=definition.blocks_movement,
-                descriptions=dict(definition.descriptions),
+                width,
+                height,
+                state={"build_memory_id": memory_id},
+                blocks_movement=form.blocks_movement,
+                blocks_vision=form.blocks_vision,
+                mobility=form.mobility,
+                traits=form.traits,
+                descriptions=dict(form.descriptions),
+                interactions={
+                    action: dict(details) for action, details in form.interactions.items()
+                },
+                capacity=form.capacity_for(20),
+                nutrition=form.nutrition,
                 type_id=definition.type_id,
                 quality=20,
+                form=definition.default_form,
             )
             existing.persistent_state = ObjectState(
-                x, y, quality=20, active=True, state="", persistent=False
+                x, y, quality=20, active=True, state={}, persistent=False
             )
             self.objects[object_id] = existing
         data = self.barrel_state(existing)
+        data["build_memory_id"] = memory_id
+        data["build_count"] = memory.build_count
+        data["persistence_modifier"] = memory.persistence_modifier
         data["built_today"] = True
         data["water_uses"] = 0
-        existing.state = json.dumps(data, separators=(",", ":"))
+        self.sync_barrel_sprite_state(data)
+        existing.state = data
         existing.active = True
         for item, amount in self.build_cost("barrel").items():
             self.player.inventory[item] -= amount
         rebuild_tile_map(self.map)
         self.log("Built a wooden barrel.")
+
+    def build_fixed_object(
+        self, type_id: str, point: tuple[float, float]
+    ) -> WorldObject:
+        definition = self.map.object_types[type_id]
+        form = definition.form_definition()
+        tile_size = self.map.tile_map.tile_size
+        width = form.footprint[0] * tile_size
+        height = form.footprint[1] * tile_size
+        column, row, _tile = self.map.tile_map.tile_at_world(*point)
+        memory_id = f"{type_id}:{column}:{row}"
+        memory = self.build_memories.setdefault(
+            memory_id,
+            BuildMemory(memory_id, type_id, column, row),
+        )
+        existing = self.object_for_build_memory(memory_id)
+        if existing is None:
+            object_id = max(self.objects, default=0) + 1
+            x = round(point[0] - width / 2)
+            y = round(point[1] - height / 2)
+            existing = WorldObject(
+                object_id,
+                definition.name,
+                definition.kind,
+                x,
+                y,
+                width,
+                height,
+                state={"build_memory_id": memory_id, "food_ids": []},
+                blocks_movement=form.blocks_movement,
+                blocks_vision=form.blocks_vision,
+                mobility=form.mobility,
+                traits=form.traits,
+                descriptions=dict(form.descriptions),
+                interactions={
+                    action: dict(details)
+                    for action, details in form.interactions.items()
+                },
+                capacity=form.capacity_for(20),
+                nutrition=form.nutrition,
+                type_id=type_id,
+                quality=20,
+                form=definition.default_form,
+            )
+            existing.persistent_state = ObjectState(
+                x, y, quality=20, active=True, state={}, persistent=False
+            )
+            self.objects[object_id] = existing
+        existing.active = True
+        for item, amount in self.build_cost(type_id).items():
+            self.player.inventory[item] -= amount
+        rebuild_tile_map(self.map)
+        self.log(f"Built a {definition.name.lower()}.")
+        return existing
+
+    def object_for_build_memory(self, memory_id: str) -> WorldObject | None:
+        linked = next(
+            (
+                obj
+                for obj in self.objects.values()
+                if obj.active and obj.state.get("build_memory_id") == memory_id
+            ),
+            None,
+        )
+        if linked is not None:
+            return linked
+        memory = self.build_memories.get(memory_id)
+        if memory is None:
+            return None
+        tile_size = self.map.tile_map.tile_size
+        at_remembered_location = next(
+            (
+                obj
+                for obj in self.objects.values()
+                if obj.active
+                and obj.type_id == memory.object_type
+                and int(obj.center[0] // tile_size) == memory.column
+                and int(obj.center[1] // tile_size) == memory.row
+            ),
+            None,
+        )
+        if at_remembered_location is not None:
+            state = (
+                self.barrel_state(at_remembered_location)
+                if at_remembered_location.type_id == "barrel"
+                else dict(at_remembered_location.state)
+            )
+            state["build_memory_id"] = memory_id
+            at_remembered_location.state = state
+        return at_remembered_location
 
     def begin_day_transition(self) -> None:
         if self.day_transition_phase is not None:
@@ -2367,10 +3686,12 @@ class Game:
     def load_storage_memories(self) -> dict[int, dict[str, dict[str, object]]]:
         memories: dict[int, dict[str, dict[str, object]]] = {}
         for storage in (obj for obj in self.objects.values() if obj.type_id == "tool_storage"):
-            try:
-                data = json.loads(storage.state) if storage.state else {}
-            except (json.JSONDecodeError, TypeError):
-                data = {}
+            storage.state["bucket_ids"] = [
+                int(object_id)
+                for object_id in storage.state.get("bucket_ids", [])
+                if int(object_id) in self.objects
+            ]
+            data = storage.state
             tools = data.get("tools", {}) if isinstance(data, dict) else {}
             memories[storage.object_id] = {
                 tool: {
@@ -2378,15 +3699,18 @@ class Game:
                     "present": bool(tools.get(tool, {}).get("present", False)),
                     "persistent": bool(tools.get(tool, {}).get("persistent", False)),
                     "quality": max(1, min(100, int(tools.get(tool, {}).get("quality", 20)))),
+                    "persistence_modifier": (
+                        float(tools.get(tool, {})["persistence_modifier"])
+                        if tools.get(tool, {}).get("persistence_modifier") is not None
+                        else None
+                    ),
                 }
                 for tool in ("hoe", "axe")
             }
         return memories
 
     def sync_storage_memory(self, storage: WorldObject) -> None:
-        storage.state = json.dumps(
-            {"tools": self.storage_memories[storage.object_id]}, separators=(",", ":")
-        )
+        storage.state = {"tools": self.storage_memories[storage.object_id]}
 
     def record_tool_stored(self, storage: WorldObject, tool: str, quality: int) -> None:
         progress = self.storage_memories[storage.object_id][tool]
@@ -2401,20 +3725,30 @@ class Game:
     def advance_storage_memories(self) -> None:
         randomizer = random.Random(44_701 + self.day.number)
         for storage_id, tools in self.storage_memories.items():
+            storage = self.objects[storage_id]
+            policy = self.object_persistence_policy(storage, "stored_tools")
             for tool in ("hoe", "axe"):
                 progress = tools[tool]
+                if policy is None:
+                    continue
+                if progress["persistence_modifier"] is None:
+                    progress["persistence_modifier"] = self.persistence_modifier(
+                        f"storage:{storage_id}:{tool}", policy.modifier_range
+                    )
+                modifier = float(progress["persistence_modifier"])
                 if progress["present"]:
                     progress["store_count"] = int(progress["store_count"]) + 1
                     if not progress["persistent"]:
-                        chance = min(1.0, self.map.permanent_soil_chance_per_till * int(progress["store_count"]))
+                        chance = self.policy_chance(
+                            int(progress["store_count"]), modifier, policy
+                        )
                         if randomizer.random() < chance:
                             progress["persistent"] = True
                         else:
                             progress["present"] = False
                 elif int(progress["store_count"]) > 0:
-                    if randomizer.random() < self.map.till_count_loss_chance:
+                    if randomizer.random() < policy.decay_chance:
                         progress["store_count"] = int(progress["store_count"]) - 1
-            storage = self.objects[storage_id]
             self.sync_storage_memory(storage)
             if storage.persistent_state is not None:
                 storage.persistent_state.state = storage.state
@@ -2431,72 +3765,132 @@ class Game:
 
     def advance_barrel_memories(self) -> None:
         randomizer = random.Random(83_119 + self.day.number)
+        seen_memories: set[str] = set()
         for barrel in (obj for obj in self.objects.values() if obj.type_id == "barrel"):
             data = self.barrel_state(barrel)
+            memory_id = data.get("build_memory_id")
+            memory = (
+                self.build_memories.get(str(memory_id))
+                if memory_id is not None
+                else None
+            )
+            if memory is not None:
+                seen_memories.add(memory.memory_id)
             if not barrel.persistent:
+                policy = self.object_persistence_policy(barrel, "object")
+                if policy is None:
+                    continue
+                if data["persistence_modifier"] is None:
+                    data["persistence_modifier"] = self.persistence_modifier(
+                        str(memory_id or f"barrel:{barrel.object_id}"),
+                        policy.modifier_range,
+                    )
+                modifier = float(data["persistence_modifier"])
+                if memory is not None:
+                    memory.persistence_modifier = modifier
                 if not barrel.active or not data["built_today"]:
-                    if int(data["build_count"]) > 0 and randomizer.random() < self.map.till_count_loss_chance:
+                    if int(data["build_count"]) > 0 and randomizer.random() < policy.decay_chance:
                         data["build_count"] = int(data["build_count"]) - 1
-                        barrel.state = json.dumps(data, separators=(",", ":"))
+                        barrel.state = data
+                        if memory is not None:
+                            memory.build_count = int(data["build_count"])
                     continue
                 data["build_count"] = int(data["build_count"]) + 1
-                chance = min(
-                    1.0,
-                    self.map.permanent_soil_chance_per_till * int(data["build_count"]),
+                if memory is not None:
+                    memory.build_count = int(data["build_count"])
+                chance = self.policy_chance(
+                    int(data["build_count"]), modifier, policy
                 )
                 data["built_today"] = False
                 data["water_uses"] = 0
+                self.sync_barrel_sprite_state(data)
                 if randomizer.random() < chance:
                     barrel.persistent = True
                     barrel.active = True
+                    if memory is not None:
+                        memory.persistent = True
+                        memory.persistence_modifier = modifier
                     barrel.persistent_state = ObjectState(
                         barrel.x,
                         barrel.y,
                         barrel.orientation,
                         barrel.quality,
                         True,
-                        json.dumps(data, separators=(",", ":")),
+                        data,
                         True,
                     )
                 else:
                     barrel.active = False
-                barrel.state = json.dumps(data, separators=(",", ":"))
+                barrel.state = data
+                if memory is not None:
+                    memory.state = dict(data)
                 continue
 
             actual_water = int(data["water_uses"])
-            memory = data["water_memory"]
-            if actual_water == int(memory["observed"]):
-                memory["count"] = int(memory["count"]) + 1
+            policy = self.object_persistence_policy(barrel, "water_level")
+            if policy is None:
+                continue
+            water_memory = data["water_memory"]
+            if water_memory["persistence_modifier"] is None:
+                water_memory["persistence_modifier"] = self.persistence_modifier(
+                    f"{memory_id or barrel.object_id}:water", policy.modifier_range
+                )
+            modifier = float(water_memory["persistence_modifier"])
+            if actual_water == int(water_memory["observed"]):
+                water_memory["count"] = int(water_memory["count"]) + 1
             else:
-                memory["observed"] = actual_water
-                memory["count"] = 1
-            chance = min(
-                1.0,
-                self.map.permanent_soil_chance_per_till * int(memory["count"]),
+                water_memory["observed"] = actual_water
+                water_memory["count"] = 1
+            chance = self.policy_chance(
+                int(water_memory["count"]), modifier, policy
             )
             if randomizer.random() < chance:
-                memory["remembered"] = actual_water
+                water_memory["remembered"] = actual_water
             data["built_today"] = False
-            barrel.state = json.dumps(data, separators=(",", ":"))
+            barrel.state = data
             persistent_data = dict(data)
-            persistent_data["water_uses"] = int(memory["remembered"])
+            persistent_data["water_uses"] = int(water_memory["remembered"])
+            self.sync_barrel_sprite_state(persistent_data)
             if barrel.persistent_state is None:
                 barrel.persistent_state = ObjectState(
-                    barrel.x, barrel.y, barrel.orientation, barrel.quality, True, "", True
+                    barrel.x, barrel.y, barrel.orientation, barrel.quality, True, {}, True
                 )
-            barrel.persistent_state.state = json.dumps(
-                persistent_data, separators=(",", ":")
-            )
+            barrel.persistent_state.state = persistent_data
+            if memory is not None:
+                memory.persistent = True
+                memory.state = dict(persistent_data)
+        for memory_id, memory in self.build_memories.items():
+            if (
+                memory_id not in seen_memories
+                and not memory.persistent
+                and memory.build_count > 0
+                and (
+                    (policy := self.map.object_types[memory.object_type]
+                     .form_definition()
+                     .persistence.get("object"))
+                    is not None
+                )
+                and randomizer.random() < policy.decay_chance
+            ):
+                memory.build_count -= 1
 
     def advance_stump_memories(self) -> None:
         randomizer = random.Random(97_331 + self.day.number)
         for tree in (obj for obj in self.objects.values() if obj.kind is ObjectKind.TREE):
             state = tree_state_data(tree.state)
             count = int(state["stump_memory_count"])
-            if state["form"] == "stump":
+            policy = self.object_persistence_policy(tree, "object", "stump")
+            if policy is None:
+                continue
+            if state["persistence_modifier"] is None:
+                state["persistence_modifier"] = self.persistence_modifier(
+                    f"tree:{tree.object_id}:stump", policy.modifier_range
+                )
+            modifier = float(state["persistence_modifier"])
+            if tree.form == "stump":
                 count += 1
                 state["stump_memory_count"] = count
-                chance = min(1.0, self.map.permanent_soil_chance_per_till * count)
+                chance = self.policy_chance(count, modifier, policy)
                 if randomizer.random() < chance:
                     tree.persistent = True
                     remembered_state = encode_tree_state(state)
@@ -2509,18 +3903,23 @@ class Game:
                         True,
                         remembered_state,
                         True,
+                        variant=tree.variant,
+                        form="stump",
+                        flavor=tree.flavor,
                     )
                 else:
-                    state["form"] = "tree"
                     state["branch_taken"] = False
                     tree.state = encode_tree_state(state)
+                    self.apply_object_form(
+                        tree, self.map.object_types["tree"].default_form
+                    )
                     if tree.persistent_state is not None:
                         baseline = dict(state)
-                        baseline["form"] = "tree"
                         baseline["branch_taken"] = False
                         tree.persistent_state.state = encode_tree_state(baseline)
+                        tree.persistent_state.form = self.map.object_types["tree"].default_form
                 continue
-            if count > 0 and randomizer.random() < self.map.till_count_loss_chance:
+            if count > 0 and randomizer.random() < policy.decay_chance:
                 state["stump_memory_count"] = count - 1
             tree.state = encode_tree_state(state)
             if tree.persistent_state is not None:
@@ -2546,12 +3945,18 @@ class Game:
             self.day_transition_progress = 0.0
 
     def finish_day(self) -> bool:
+        if (
+            self.day.mode is Mode.DIRECT
+            and self.day.today_routine
+            and not self.auto_cheat_memory
+        ):
+            self.day.remembered_routine = list(self.day.today_routine)
         try:
             advance_level_tile_states(
                 self.map.tile_states,
                 day_number=self.day.number,
-                permanent_chance_per_till=self.map.permanent_soil_chance_per_till,
-                till_count_loss_chance=self.map.till_count_loss_chance,
+                reverted_till_progress_range=self.map.reverted_till_progress_range,
+                persistence_modifier_range=self.map.tile_persistence_modifier_range,
             )
             self.advance_storage_memories()
             self.advance_barrel_memories()
@@ -2561,6 +3966,8 @@ class Game:
                 self.persistence_path,
                 tile_size=self.map.tile_map.tile_size,
                 tile_states=self.map.tile_states,
+                remembered_routine=self.day.remembered_routine,
+                build_memories=self.build_memories,
             )
             next_day_map = load_map(
                 persistence_path=self.persistence_path,
@@ -2572,14 +3979,19 @@ class Game:
                 self.persistence_path,
                 tile_size=next_day_map.tile_map.tile_size,
                 tile_states=next_day_map.tile_states,
+                remembered_routine=self.day.remembered_routine,
+                build_memories=next_day_map.build_memories,
             )
         except (MapLoadError, ObjectPersistenceError) as exc:
             self.log(f"Could not finish the day: {exc}")
             return False
-        if self.day.mode is Mode.DIRECT and self.day.today_routine:
-            self.day.remembered_routine = list(self.day.today_routine)
         self.map = next_day_map
         self.objects = next_day_map.objects
+        self.build_memories = next_day_map.build_memories
+        self.sync_all_barrel_sprite_states()
+        self.player.carried_objects = [
+            obj for obj in self.objects.values() if obj.container == "player"
+        ]
         self.storage_memories = self.load_storage_memories()
         self.restore_persistent_tools()
         self.day.number += 1
@@ -2634,11 +4046,10 @@ class Game:
         self.screen.set_clip(None)
         self.draw_top_bar()
         self.draw_ui()
-        if self.day.mode is Mode.MORNING and self.day_transition_phase is None:
-            if self.adjusting_memory:
-                self.draw_memory_editor()
-            else:
-                self.draw_morning_menu()
+        if self.adjusting_memory:
+            self.draw_memory_editor()
+        elif self.day.mode is Mode.MORNING and self.day_transition_phase is None:
+            self.draw_morning_menu()
         if self.context_menu_options:
             self.draw_context_menu()
         self.draw_day_transition()
@@ -2665,7 +4076,24 @@ class Game:
         self.text("Day", (12, 12), self.small_font)
         self.text(f"{self.day.number}", (44, 12), self.small_font)
         time_area = pygame.Rect(MAP_LEFT, 0, MAP_RIGHT - MAP_LEFT, TOP_BAR_HEIGHT)
-        track_width = 260
+        speed_button_gap = 4
+        speed_button_widths = [
+            max(45, self.small_font.size(label)[0] + 10)
+            for label, _ in TIME_SPEED_OPTIONS
+        ]
+        speed_controls_width = (
+            sum(speed_button_widths)
+            + (len(TIME_SPEED_OPTIONS) - 1) * speed_button_gap
+        )
+        track_width = (
+            time_area.width
+            - 96  # fixed time display and its gap
+            - 16  # gap between sun track and pause
+            - 58  # pause button
+            - 4   # gap after pause
+            - speed_controls_width
+            - 8   # right inset
+        )
         track_x = time_area.x + 96
         track_y = 12
         pygame.draw.rect(self.screen, (84, 93, 98), (track_x, track_y, track_width, 18))
@@ -2694,8 +4122,9 @@ class Game:
         rendered = self.small_font.render(pause_label, True, (232, 232, 222))
         self.screen.blit(rendered, rendered.get_rect(center=self.pause_button.center))
         button_x += 62
-        for label, speed in TIME_SPEED_OPTIONS:
-            button_width = 45
+        for (label, speed), button_width in zip(
+            TIME_SPEED_OPTIONS, speed_button_widths
+        ):
             rect = pygame.Rect(button_x, 8, button_width, 28)
             selected = speed == self.time_speed
             pygame.draw.rect(self.screen, (205, 194, 126) if selected else (74, 82, 87), rect, border_radius=3)
@@ -2703,7 +4132,7 @@ class Game:
             rendered = self.small_font.render(label, True, (30, 32, 33) if selected else (232, 232, 222))
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
             self.time_speed_buttons.append((rect, speed))
-            button_x += button_width + 4
+            button_x += button_width + speed_button_gap
 
     def draw_tiles(self) -> None:
         tile_map = self.map.tile_map
@@ -2723,15 +4152,29 @@ class Game:
         first_column = max(0, int(self.camera.x // tile_map.tile_size))
         last_column = min(
             tile_map.columns - 1,
-            int((self.camera.x + self.camera.viewport_width / self.camera.zoom) // tile_map.tile_size),
+            int(
+                (
+                    self.camera.x
+                    + self.camera.viewport_width / self.camera.effective_zoom
+                )
+                // tile_map.tile_size
+            ),
         )
         first_row = max(0, int(self.camera.y // tile_map.tile_size))
         last_row = min(
             tile_map.rows - 1,
-            int((self.camera.y + self.camera.viewport_height / self.camera.zoom) // tile_map.tile_size),
+            int(
+                (
+                    self.camera.y
+                    + self.camera.viewport_height / self.camera.effective_zoom
+                )
+                // tile_map.tile_size
+            ),
         )
-        scaled_size = max(1, round(tile_map.tile_size * self.camera.zoom))
-        wall_width = max(1, round(4 * self.camera.zoom))
+        scaled_size = max(1, round(tile_map.tile_size * self.camera.effective_zoom))
+        wall_width = max(
+            1, round(4 * self.world_scale * self.camera.effective_zoom)
+        )
         room_colors = {
             room.structure_id: room.display_color
             for room in self.map.structures
@@ -2754,23 +4197,6 @@ class Game:
                     if room_property is not None:
                         color = room_colors.get(room_property.removeprefix("room:"), color)
                 pygame.draw.rect(self.screen, color, rect)
-                crop_state = self.map.tile_states.get((column, row))
-                if crop_state is not None and crop_state.crop == "wheat":
-                    growth = min(1.0, crop_state.crop_growth)
-                    stem_color = (196, 174, 73) if growth >= 1.0 else (112, 151, 73)
-                    center_x = rect.centerx
-                    stem_top = rect.bottom - max(6, round((8 + growth * 15) * self.camera.zoom))
-                    pygame.draw.line(
-                        self.screen,
-                        stem_color,
-                        (center_x, rect.bottom - 4),
-                        (center_x, stem_top),
-                        max(1, round(2 * self.camera.zoom)),
-                    )
-                    pygame.draw.line(self.screen, stem_color, (center_x, rect.centery), (center_x - 5, rect.centery - 5), 1)
-                    pygame.draw.line(self.screen, stem_color, (center_x, rect.centery - 3), (center_x + 5, rect.centery - 8), 1)
-                if self.camera.zoom >= 0.75:
-                    pygame.draw.rect(self.screen, (55, 70, 58), rect, 1)
                 visible_tiles.append((tile, rect))
 
         # Walls are a separate top layer. Drawing them during the fill pass lets
@@ -2781,13 +4207,13 @@ class Game:
 
     def draw_tile_edges(self, tile, rect: pygame.Rect, width: int) -> None:
         color = (48, 42, 37)
-        if not tile.passable[TileEdge.NORTH]:
+        if "wall:north" in tile.properties:
             pygame.draw.line(self.screen, color, rect.topleft, rect.topright, width)
-        if not tile.passable[TileEdge.EAST]:
+        if "wall:east" in tile.properties:
             pygame.draw.line(self.screen, color, rect.topright, rect.bottomright, width)
-        if not tile.passable[TileEdge.SOUTH]:
+        if "wall:south" in tile.properties:
             pygame.draw.line(self.screen, color, rect.bottomleft, rect.bottomright, width)
-        if not tile.passable[TileEdge.WEST]:
+        if "wall:west" in tile.properties:
             pygame.draw.line(self.screen, color, rect.topleft, rect.bottomleft, width)
 
     def draw_room_labels(self) -> None:
@@ -2803,58 +4229,27 @@ class Game:
 
     def draw_objects(self) -> None:
         for obj in self.objects.values():
-            if not obj.active:
-                continue
-            color = self.object_color(obj)
-            if obj.kind is ObjectKind.TREE and tree_state_data(obj.state)["form"] == "stump":
-                center = self.camera.world_to_screen(obj.center)
-                radius_x = max(3, round(13 * self.camera.zoom))
-                radius_y = max(2, round(9 * self.camera.zoom))
-                rect = pygame.Rect(0, 0, radius_x * 2, radius_y * 2)
-                rect.center = center
-                selected = obj.object_id == self.selected_id
-                border_color = (245, 225, 120) if selected else (45, 31, 20)
-                pygame.draw.ellipse(self.screen, (103, 67, 39), rect)
-                pygame.draw.ellipse(
-                    self.screen,
-                    border_color,
-                    rect,
-                    max(1, round((4 if selected else 2) * self.camera.zoom)),
-                )
-                self.world_text("Stump", (obj.center[0] - 20, obj.center[1] - 7), self.small_font)
-                continue
-            if obj.kind is ObjectKind.BARREL:
-                center = self.camera.world_to_screen(obj.center)
-                radius = max(3, round(min(obj.width, obj.height) * self.camera.zoom / 2))
-                selected = obj.object_id == self.selected_id
-                border = max(1, round((4 if selected else 2) * self.camera.zoom))
-                border_color = (245, 225, 120) if selected else (45, 31, 20)
-                pygame.draw.circle(self.screen, border_color, center, radius + border)
-                pygame.draw.circle(self.screen, color, center, radius)
-                pygame.draw.circle(self.screen, (76, 48, 27), center, max(1, round(radius * 0.68)), border)
-                label = self.small_font.render("B", True, (244, 225, 184))
-                if self.camera.zoom != 1.0:
-                    label = pygame.transform.smoothscale(
-                        label,
-                        (
-                            max(1, round(label.get_width() * self.camera.zoom)),
-                            max(1, round(label.get_height() * self.camera.zoom)),
-                        ),
-                    )
-                self.screen.blit(label, label.get_rect(center=center))
+            if not obj.active or obj.container is not None:
                 continue
             screen_x, screen_y = self.camera.world_to_screen((obj.x, obj.y))
             rect = pygame.Rect(
                 screen_x,
                 screen_y,
-                max(1, round(obj.width * self.camera.zoom)),
-                max(1, round(obj.height * self.camera.zoom)),
+                max(1, round(obj.width * self.camera.effective_zoom)),
+                max(1, round(obj.height * self.camera.effective_zoom)),
             )
-            pygame.draw.rect(self.screen, color, rect)
+            if not MAP_VIEWPORT.colliderect(rect.inflate(8, 8)):
+                continue
             selected = obj.object_id == self.selected_id
             border = max(1, round((4 if selected else 2) * self.camera.zoom))
             border_color = (245, 225, 120) if selected else (35, 35, 35)
-            if obj.kind is ObjectKind.WORKBENCH and not selected and has_new_craftable_tool(self.player):
+            show_border = selected
+            if (
+                obj.kind is ObjectKind.WORKBENCH
+                and not selected
+                and bool(available_actions(obj, self.player))
+            ):
+                show_border = True
                 pulse = (math.sin(pygame.time.get_ticks() / 350.0) + 1.0) / 2.0
                 low = (74, 67, 48)
                 high = (205, 177, 91)
@@ -2863,35 +4258,111 @@ class Game:
                     for channel in range(3)
                 )
                 border = max(border, max(1, round((2 + pulse) * self.camera.zoom)))
-            pygame.draw.rect(self.screen, border_color, rect, border)
+            definition = self.map.object_types[obj.type_id]
+            loaded_sprite = self.object_sprites.sprite_for(obj, definition)
+            if loaded_sprite is not None:
+                sprite = loaded_sprite.image
+                if loaded_sprite.anchor.mode == "random_within_tile":
+                    margin = loaded_sprite.anchor.margin
+                    margin = 0.2 if margin is None else margin
+                    anchor_x, anchor_y = 0.5, 0.5
+                else:
+                    margin = None
+                    placement_x, placement_y = 0.5, 0.5
+                    anchor_x, anchor_y = loaded_sprite.anchor.point or (0.5, 0.5)
+                if obj.orientation == "N/S" and obj.width != obj.height:
+                    sprite = pygame.transform.rotate(sprite, 90)
+                    anchor_x, anchor_y = anchor_y, 1.0 - anchor_x
+                if loaded_sprite.rotation_angles:
+                    rotation_randomizer = random.Random(
+                        f"remembering:sprite-rotation:{obj.type_id}:{obj.object_id}"
+                    )
+                    angle = (
+                        rotation_randomizer.uniform(0.0, 360.0)
+                        if loaded_sprite.rotation_angles == "all"
+                        else rotation_randomizer.choice(loaded_sprite.rotation_angles)
+                    )
+                    if angle:
+                        sprite = pygame.transform.rotate(sprite, -angle)
+                        radians = math.radians(angle)
+                        offset_x, offset_y = anchor_x - 0.5, anchor_y - 0.5
+                        anchor_x = (
+                            0.5
+                            + math.cos(radians) * offset_x
+                            - math.sin(radians) * offset_y
+                        )
+                        anchor_y = (
+                            0.5
+                            + math.sin(radians) * offset_x
+                            + math.cos(radians) * offset_y
+                        )
+                maximum_size = (
+                    (
+                        max(1, round(obj.width * (1.0 - margin * 2.0))),
+                        max(1, round(obj.height * (1.0 - margin * 2.0))),
+                    )
+                    if margin is not None
+                    else (obj.width, obj.height)
+                )
+                render_width, render_height = sprite_size_within_footprint(
+                    sprite.get_size(), maximum_size
+                )
+                if margin is not None:
+                    placement_x, placement_y = random_within_tile_anchor(
+                        obj.object_id,
+                        obj.type_id,
+                        (render_width, render_height),
+                        (obj.width, obj.height),
+                        margin,
+                    )
+                scaled = pygame.transform.scale(
+                    sprite,
+                    (
+                        max(1, round(render_width * self.camera.zoom)),
+                        max(1, round(render_height * self.camera.zoom)),
+                    ),
+                )
+                sprite_rect = scaled.get_rect()
+                sprite_rect.x = round(
+                    rect.left + rect.width * placement_x - sprite_rect.width * anchor_x
+                )
+                sprite_rect.y = round(
+                    rect.top + rect.height * placement_y - sprite_rect.height * anchor_y
+                )
+                self.screen.blit(scaled, sprite_rect)
+                if show_border:
+                    pygame.draw.rect(self.screen, border_color, rect, border)
+                continue
+
+            pygame.draw.rect(self.screen, self.object_color(obj), rect)
+            if show_border:
+                pygame.draw.rect(self.screen, border_color, rect, border)
             label = object_map_label(obj)
-            rendered_width = self.small_font.size(label)[0]
-            available_width = obj.width
-            display_label = compact_label(label, available_width, rendered_width)
+            display_label = compact_label(
+                label, obj.width, self.small_font.size(label)[0]
+            )
             self.world_centered_text(display_label, obj, self.small_font)
 
     def object_color(self, obj: WorldObject) -> tuple[int, int, int]:
-        if obj.kind is ObjectKind.FIELD:
-            return {
-                "wild": (89, 94, 55),
-                "prepared": (105, 69, 45),
-                "planted": (111, 139, 66),
-                "mature": (190, 164, 73),
-            }[obj.state]
         return {
+            ObjectKind.OBJECT: (154, 84, 111),
             ObjectKind.BED: (115, 91, 91),
             ObjectKind.TABLE: (117, 84, 54),
             ObjectKind.FOOD_PREP_STATION: (103, 103, 103),
-            ObjectKind.BERRY_BUSH: (74, 113, 69),
+            ObjectKind.BUSH: (74, 113, 69),
             ObjectKind.WORKBENCH: (125, 86, 52),
             ObjectKind.TOOL_STORAGE: (91, 75, 62),
-            ObjectKind.STICK: (121, 84, 51),
-            ObjectKind.STONE: (119, 123, 124),
+            ObjectKind.BRANCH: (121, 84, 51),
+            ObjectKind.PEBBLE: (119, 123, 124),
             ObjectKind.GRASS: (75, 130, 63),
-            ObjectKind.WILD_GRAIN: (178, 149, 62),
+            ObjectKind.WILD_PLANT: (178, 149, 62),
             ObjectKind.TREE: (54, 105, 61),
             ObjectKind.BOULDER: (91, 94, 91),
             ObjectKind.BARREL: (115, 78, 46),
+            ObjectKind.CROP: (111, 139, 66),
+            ObjectKind.BUCKET: (139, 99, 57),
+            ObjectKind.BASKET: (155, 118, 72),
+            ObjectKind.CUPBOARD: (112, 77, 48),
         }[obj.kind]
 
     def draw_command_selection(self) -> None:
@@ -2946,26 +4417,45 @@ class Game:
                 (255, 215, 120),
                 points[index - 1],
                 points[index],
-                max(1, round(2 * self.camera.zoom)),
+                max(
+                    1,
+                    round(
+                        2 * self.world_scale * self.camera.effective_zoom
+                    ),
+                ),
             )
 
     def draw_player(self) -> None:
         px, py = self.camera.world_to_screen((self.player.x, self.player.y))
-        radius = max(2, round(PLAYER_RADIUS * self.camera.zoom))
-        outline = max(1, round(2 * self.camera.zoom))
+        radius = max(
+            2, round(self.player_radius * self.camera.effective_zoom)
+        )
+        outline = max(
+            1,
+            round(2 * self.world_scale * self.camera.effective_zoom),
+        )
+        if self.active_command in AREA_COMMAND_TYPES:
+            pygame.draw.circle(
+                self.screen,
+                (235, 205, 92),
+                (px, py),
+                radius + max(5, outline * 3),
+                max(2, outline),
+            )
         pygame.draw.circle(self.screen, (255, 220, 120), (px, py), radius + outline)
         pygame.draw.circle(self.screen, (222, 214, 187), (px, py), radius)
         pygame.draw.circle(self.screen, (35, 35, 35), (px, py), radius, outline)
-        eye_offset_x = round(4 * self.camera.zoom)
-        eye_offset_y = round(3 * self.camera.zoom)
-        eye_radius = max(1, round(2 * self.camera.zoom))
+        visual_zoom = self.world_scale * self.camera.effective_zoom
+        eye_offset_x = round(4 * visual_zoom)
+        eye_offset_y = round(3 * visual_zoom)
+        eye_radius = max(1, round(2 * visual_zoom))
         pygame.draw.circle(self.screen, (35, 35, 35), (px - eye_offset_x, py - eye_offset_y), eye_radius)
         pygame.draw.circle(self.screen, (35, 35, 35), (px + eye_offset_x, py - eye_offset_y), eye_radius)
         mouth_rect = pygame.Rect(
-            px - round(6 * self.camera.zoom),
-            py + round(2 * self.camera.zoom),
-            max(2, round(12 * self.camera.zoom)),
-            max(2, round(8 * self.camera.zoom)),
+            px - round(6 * visual_zoom),
+            py + round(2 * visual_zoom),
+            max(2, round(12 * visual_zoom)),
+            max(2, round(8 * visual_zoom)),
         )
         pygame.draw.arc(self.screen, (35, 35, 35), mouth_rect, 0, math.pi, outline)
         if self.pending_job:
@@ -2979,10 +4469,29 @@ class Game:
         if self.thought_bubble_text is None:
             return
         px, py = self.camera.world_to_screen((self.player.x, self.player.y))
-        rendered = self.small_font.render(self.thought_bubble_text, True, (35, 35, 35))
-        bubble = rendered.get_rect()
-        bubble.inflate_ip(20, 14)
-        bubble.midbottom = (px, py - max(18, round(PLAYER_RADIUS * self.camera.zoom)))
+        lines = wrap_text(
+            self.thought_bubble_text,
+            self.small_font,
+            min(420, MAP_VIEWPORT.width - 40),
+        )
+        rendered_lines = [
+            self.small_font.render(line, True, (35, 35, 35)) for line in lines
+        ]
+        line_height = self.small_font.get_linesize()
+        bubble = pygame.Rect(
+            0,
+            0,
+            max(rendered.get_width() for rendered in rendered_lines) + 20,
+            len(rendered_lines) * line_height + 14,
+        )
+        bubble.midbottom = (
+            px,
+            py
+            - max(
+                18,
+                round(self.player_radius * self.camera.effective_zoom),
+            ),
+        )
         bubble.clamp_ip(MAP_VIEWPORT.inflate(-8, -8))
         pygame.draw.rect(self.screen, (244, 239, 219), bubble, border_radius=10)
         pygame.draw.rect(self.screen, (55, 55, 50), bubble, 2, border_radius=10)
@@ -2991,7 +4500,15 @@ class Game:
         pygame.draw.circle(self.screen, (55, 55, 50), (tail_x, bubble.bottom + 5), 5, 1)
         pygame.draw.circle(self.screen, (244, 239, 219), (px, bubble.bottom + 12), 3)
         pygame.draw.circle(self.screen, (55, 55, 50), (px, bubble.bottom + 12), 3, 1)
-        self.screen.blit(rendered, rendered.get_rect(center=bubble.center))
+        text_top = bubble.top + 7
+        for index, rendered in enumerate(rendered_lines):
+            self.screen.blit(
+                rendered,
+                rendered.get_rect(
+                    centerx=bubble.centerx,
+                    top=text_top + index * line_height,
+                ),
+            )
 
     def draw_ui(self) -> None:
         sidebar = pygame.Rect(0, 0, SIDEBAR_WIDTH, HEIGHT)
@@ -3011,11 +4528,17 @@ class Game:
         )
         axe = "carried" if self.player.carrying_axe else "stored" if self.player.has_axe else "none"
         bucket = (
-            f"{self.player.bucket_water_uses}/{BUCKET_CAPACITY} uses"
+            f"{self.player.bucket_water_uses}/{self.bucket_capacity} uses"
             if self.player.has_bucket
             else "none"
         )
-        basket = "owned" if self.player.has_basket else "none"
+        basket = "carried" if self.player.has_basket else "none"
+        carried_food = [
+            obj.name
+            for obj in self.player.carried_objects
+            if obj.active and "edible" in obj.traits
+        ]
+        food = ", ".join(carried_food) if carried_food else "none"
         stats_height = HEIGHT // 3 + 24
         inventory_top = 46 + stats_height
         stats_panel = pygame.Rect(WIDTH - RIGHT_SIDEBAR_WIDTH, 46, RIGHT_SIDEBAR_WIDTH, stats_height)
@@ -3033,7 +4556,7 @@ class Game:
         self.text(f"Axe: {axe}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 206), self.small_font)
         self.text(f"Bucket: {bucket}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 230), self.small_font)
         self.text(f"Basket: {basket}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 254), self.small_font)
-        self.text(f"Meal: {'ready' if self.player.meal_ready else 'none'}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 278), self.small_font)
+        self.text(f"Food: {food}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 278), self.small_font)
 
         self.text("Inventory", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, inventory_top + 12), self.small_font, (172, 176, 182))
         if inventory != "empty":
@@ -3059,9 +4582,17 @@ class Game:
             kind_label = obj.kind.name.lower().replace("_", " ").title()
             self.text(f"{kind_label} | {obj.quality_stage.title()}", (12, 100), self.small_font, (172, 176, 182))
             description_lines = wrap_text(obj.description, self.small_font, SIDEBAR_WIDTH - 24)
+            description_lines.extend(crop_inspection_lines(obj))
+            if "edible" in obj.traits:
+                description_lines.append(f"Nutrition: {obj.nutrition}")
+            if obj.kind is ObjectKind.CUPBOARD:
+                description_lines.append(
+                    f"Food stored: {len(obj.state.get('food_ids', []))}/"
+                    f"{obj.capacity.get('food', 0)}"
+                )
             if obj.kind is ObjectKind.BARREL:
                 description_lines.append(
-                    f"Water: {self.barrel_state(obj)['water_uses']}/{BARREL_CAPACITY} uses"
+                    f"Water: {self.barrel_state(obj)['water_uses']}/{self.barrel_capacity} uses"
                 )
             if show_persistence:
                 description_lines.extend(self.object_persistence_details(obj))
@@ -3089,18 +4620,28 @@ class Game:
             column, row = self.selected_tile
             tile = self.map.tile_map.tile_at(column, row)
             state = self.map.tile_states.get((column, row))
+            crop = self.crop_at_tile(column, row)
             tile_name = tile.kind.value.replace("_", " ").title() if tile is not None else "Tile"
             self.text(tile_name, (12, 72), self.font)
             self.text(f"Tile: {column}, {row}", (12, 100), self.small_font, (172, 176, 182))
-            if state is not None and state.crop is not None:
-                self.text(f"Plant: {state.crop.title()}", (12, 128), self.small_font)
-                self.text(f"Growth: {state.crop_growth * 100:.1f}%", (12, 152), self.small_font)
-                self.text(f"Watered: {'yes' if state.watered else 'no'}", (12, 176), self.small_font)
-                self.text(f"Tended: {'yes' if state.tended else 'no'}", (12, 200), self.small_font)
+            if crop is not None:
+                self.text(f"Plant: {(crop.variant or crop.name).title()}", (12, 128), self.small_font)
+                self.text(f"Form: {crop.form.title()}", (12, 152), self.small_font)
+                self.text(f"Growth: {float(crop.state.get('growth_progress', 0.0)) * 100:.1f}%", (12, 176), self.small_font)
+                self.text(
+                    f"Water: {float(crop.state.get('water', 0.0)):.1f}%",
+                    (12, 200),
+                    self.small_font,
+                )
+                self.text(
+                    f"Tended: {float(crop.state.get('tended', 0.0)):.1f}%",
+                    (12, 224),
+                    self.small_font,
+                )
             else:
                 self.text("Plant: none", (12, 128), self.small_font, (210, 214, 202))
             if show_persistence:
-                start_y = 224 if state is not None and state.crop is not None else 152
+                start_y = 248 if crop is not None else 152
                 for index, line in enumerate(self.tile_persistence_details(column, row)):
                     self.text(line, (12, start_y + index * 22), self.small_font, (235, 205, 120))
         else:
@@ -3130,10 +4671,44 @@ class Game:
         )
         self.screen.blit(quantity_surface, quantity_surface.get_rect(center=(147, 449)))
 
+        self.till_time_buttons.clear()
+        command_start_y = 466
+        if self.active_command == "Till Grassland":
+            self.text("Till time", (12, 472), self.small_font, (172, 176, 182))
+            decrease_time = pygame.Rect(82, 467, 24, 24)
+            increase_time = pygame.Rect(154, 467, 24, 24)
+            until_done = pygame.Rect(184, 467, 94, 24)
+            for rect, label, action in (
+                (decrease_time, "-", "decrease"),
+                (increase_time, "+", "increase"),
+                (until_done, "Until Done", "until_done"),
+            ):
+                selected = action == "until_done" and self.till_until_done
+                pygame.draw.rect(
+                    self.screen,
+                    (205, 194, 126) if selected else (174, 169, 145),
+                    rect,
+                )
+                pygame.draw.rect(self.screen, (35, 35, 35), rect, 1)
+                rendered = self.small_font.render(label, True, (25, 25, 25))
+                self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+                self.till_time_buttons.append((rect, action))
+            budget_label = (
+                "done"
+                if self.till_until_done
+                else (
+                    f"{self.till_max_game_minutes // 60}h"
+                    if self.till_max_game_minutes % 60 == 0
+                    else f"{self.till_max_game_minutes / 60:.1f}h"
+                )
+            )
+            self.text(budget_label, (112, 472), self.small_font, (225, 225, 214))
+            command_start_y = 496
+
         self.command_category_buttons.clear()
         if self.active_command_category is None:
             for index, category in enumerate(AREA_COMMAND_CATEGORIES):
-                rect = pygame.Rect(12, 466 + index * 30, SIDEBAR_WIDTH - 24, 27)
+                rect = pygame.Rect(12, command_start_y + index * 30, SIDEBAR_WIDTH - 24, 27)
                 pygame.draw.rect(self.screen, (103, 105, 94), rect)
                 pygame.draw.rect(self.screen, (35, 35, 35), rect, 2)
                 self.text(f"{index + 1}. {category}", (rect.x + 7, rect.y + 6), self.small_font, (230, 230, 218))
@@ -3145,7 +4720,7 @@ class Game:
             else []
         )
         for index, command in enumerate(visible_commands):
-            rect = pygame.Rect(12, 466 + index * 30, SIDEBAR_WIDTH - 24, 27)
+            rect = pygame.Rect(12, command_start_y + index * 30, SIDEBAR_WIDTH - 24, 27)
             selected = command == self.active_command
             pygame.draw.rect(self.screen, (205, 194, 126) if selected else (174, 169, 145), rect)
             pygame.draw.rect(self.screen, (245, 225, 120) if selected else (35, 35, 35), rect, 2)
@@ -3186,32 +4761,115 @@ class Game:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 165))
         self.screen.blit(overlay, (0, 0))
-        panel = pygame.Rect(SIDEBAR_WIDTH + 245, 65, 650, 630)
+        panel = pygame.Rect(20, 18, WIDTH - 40, HEIGHT - 36)
         pygame.draw.rect(self.screen, (232, 227, 205), panel)
         pygame.draw.rect(self.screen, (43, 43, 43), panel, 4)
-        self.text("Adjust Memory", (panel.x + 190, panel.y + 24), self.title_font, (35, 35, 35))
+        self.text("Live Memory Editor", (panel.x + 28, panel.y + 18), self.title_font, (35, 35, 35))
         self.text(
-            "Select an order. Shift+Up/Down moves; Delete removes; R replaces.",
-            (panel.x + 36, panel.y + 72),
+            "C/Esc closes · Enter saves a field · Values use JSON syntax.",
+            (panel.x + 390, panel.y + 31),
             self.small_font,
             (35, 35, 35),
         )
         routine = self.day.remembered_routine
         self.memory_editor_rows.clear()
-        visible_count = 9
+        self.memory_editor_buttons.clear()
+        self.text("File name", (panel.x + 390, panel.y + 62), self.small_font, (35, 35, 35))
+        self.memory_file_name_rect = pygame.Rect(panel.x + 470, panel.y + 54, 170, 30)
+        editing_name = self.memory_edit_field == "__memory_file_name__"
+        pygame.draw.rect(
+            self.screen,
+            (255, 250, 225) if editing_name else (218, 213, 190),
+            self.memory_file_name_rect,
+        )
+        pygame.draw.rect(self.screen, (76, 105, 68), self.memory_file_name_rect, 2)
+        shown_name = self.memory_edit_buffer if editing_name else self.memory_file_name
+        self.text(
+            shown_name,
+            (self.memory_file_name_rect.x + 6, self.memory_file_name_rect.y + 6),
+            self.small_font,
+            (35, 35, 35),
+        )
+        for index, label in enumerate(["Save", "Load", "Save Homestead"]):
+            width = 130 if label == "Save Homestead" else 72
+            x = (
+                self.memory_file_name_rect.right + 8
+                if index == 0
+                else self.memory_file_name_rect.right + 88
+                if index == 1
+                else self.memory_file_name_rect.right + 168
+            )
+            rect = pygame.Rect(x, panel.y + 54, width, 30)
+            pygame.draw.rect(self.screen, (174, 169, 145), rect)
+            pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
+            rendered = self.small_font.render(label, True, (35, 35, 35))
+            self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+            self.memory_editor_buttons.append((rect, label))
+
+        list_rect = pygame.Rect(panel.x + 24, panel.y + 94, 330, panel.height - 162)
+        pygame.draw.rect(self.screen, (218, 213, 190), list_rect)
+        visible_count = 12
         start = max(0, min(self.memory_edit_index - visible_count // 2, len(routine) - visible_count))
         for visible_index, routine_index in enumerate(range(start, min(len(routine), start + visible_count))):
             step = routine[routine_index]
-            rect = pygame.Rect(panel.x + 30, panel.y + 108 + visible_index * 42, panel.width - 60, 35)
+            rect = pygame.Rect(list_rect.x + 8, list_rect.y + 8 + visible_index * 38, list_rect.width - 16, 32)
             selected = routine_index == self.memory_edit_index
             pygame.draw.rect(self.screen, (195, 194, 157) if selected else (213, 209, 183), rect)
-            pygame.draw.rect(self.screen, (55, 55, 50), rect, 2 if selected else 1)
+            next_command = (
+                self.day.replay_index < len(routine)
+                and routine_index == self.day.replay_index
+            )
+            pygame.draw.rect(
+                self.screen,
+                (56, 112, 62) if next_command else (55, 55, 50),
+                rect,
+                4 if next_command else 2 if selected else 1,
+            )
             quantity = f" ×{step.quantity}" if step.quantity is not None else ""
             self.text(f"{routine_index + 1}. {step.action}{quantity}", (rect.x + 10, rect.y + 8), self.small_font, (35, 35, 35))
             self.memory_editor_rows.append((rect, routine_index))
-        self.memory_editor_buttons.clear()
-        for index, label in enumerate(["Move Up", "Move Down", "Remove", "Replace", "Done"]):
-            rect = pygame.Rect(panel.x + 30 + index * 118, panel.bottom - 62, 108, 34)
+        if not routine:
+            self.text("No remembered commands.", (list_rect.x + 18, list_rect.y + 18), self.font, (70, 70, 65))
+
+        self.memory_editor_fields.clear()
+        if routine:
+            step = routine[self.memory_edit_index]
+            field_x = list_rect.right + 24
+            field_width = panel.right - field_x - 24
+            for index, field_name in enumerate(routine_step_editable_fields(step)):
+                y = panel.y + 94 + index * 38
+                value_rect = pygame.Rect(field_x + 164, y, field_width - 164, 32)
+                self.text(field_name, (field_x, y + 7), self.small_font, (35, 35, 35))
+                active = field_name == self.memory_edit_field
+                pygame.draw.rect(
+                    self.screen,
+                    (255, 250, 225) if active else (218, 213, 190),
+                    value_rect,
+                )
+                pygame.draw.rect(
+                    self.screen,
+                    (76, 105, 68) if active else (90, 88, 78),
+                    value_rect,
+                    2,
+                )
+                value_text = (
+                    self.memory_edit_buffer
+                    if active
+                    else json.dumps(routine_field_editor_value(step, field_name))
+                )
+                while value_text and self.small_font.size(value_text)[0] > value_rect.width - 12:
+                    value_text = "…" + value_text[2:]
+                self.text(value_text, (value_rect.x + 6, value_rect.y + 7), self.small_font, (35, 35, 35))
+                self.memory_editor_fields.append((value_rect, field_name))
+        labels = ["Move Up", "Move Down", "Duplicate", "Remove", "New", "Done"]
+        button_width = (panel.width - 48 - (len(labels) - 1) * 8) // len(labels)
+        for index, label in enumerate(labels):
+            rect = pygame.Rect(
+                panel.x + 24 + index * (button_width + 8),
+                panel.bottom - 50,
+                button_width,
+                32,
+            )
             pygame.draw.rect(self.screen, (174, 169, 145), rect)
             pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
             rendered = self.small_font.render(label, True, (35, 35, 35))
@@ -3261,12 +4919,13 @@ class Game:
         color: tuple[int, int, int] = (238, 238, 228),
     ) -> None:
         rendered = font.render(value, True, color)
-        if self.camera.zoom != 1.0:
+        visual_zoom = self.world_scale * self.camera.effective_zoom
+        if visual_zoom != 1.0:
             rendered = pygame.transform.smoothscale(
                 rendered,
                 (
-                    max(1, round(rendered.get_width() * self.camera.zoom)),
-                    max(1, round(rendered.get_height() * self.camera.zoom)),
+                    max(1, round(rendered.get_width() * visual_zoom)),
+                    max(1, round(rendered.get_height() * visual_zoom)),
                 ),
             )
         self.screen.blit(rendered, self.camera.world_to_screen(world_pos))
@@ -3284,7 +4943,11 @@ class Game:
             max(1, obj.width - 4) / rendered.get_width(),
             max(1, obj.height - 4) / rendered.get_height(),
         )
-        final_scale = logical_scale * self.camera.zoom
+        final_scale = (
+            logical_scale
+            * self.world_scale
+            * self.camera.effective_zoom
+        )
         rendered = pygame.transform.smoothscale(
             rendered,
             (

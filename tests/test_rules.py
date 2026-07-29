@@ -1,42 +1,71 @@
 from collections import Counter
 
-from remembering.model import ObjectKind, PlayerState, WorldObject
-from remembering.rules import (
-    available_actions,
-    can_craft_axe,
-    can_craft_basket,
-    can_craft_bucket,
-    can_craft_hoe,
-    has_new_craftable_tool,
-)
+from remembering.model import PlayerState, WorldObject
+from remembering.rules import available_actions
+from remembering.world import load_object_types
+
+
+def catalog_object(
+    type_id: str,
+    *,
+    form_id: str | None = None,
+    variant: str | None = None,
+    state: dict[str, object] | None = None,
+    container: str | None = None,
+) -> WorldObject:
+    definition = load_object_types()[type_id]
+    form = definition.form_definition(form_id, variant)
+    return WorldObject(
+        1,
+        form.name or definition.name_for(variant),
+        definition.kind,
+        0,
+        0,
+        32,
+        32,
+        state=state or {},
+        interactions={
+            label: dict(action) for label, action in form.interactions.items()
+        },
+        capacity=form.capacity_for(100),
+        type_id=type_id,
+        variant=variant,
+        form=form.form_id,
+        mobility=form.mobility,
+        traits=form.traits,
+        container=container,
+    )
 
 
 def test_hoe_recipe_requires_all_three_resources() -> None:
-    player = PlayerState(inventory=Counter({"stick": 1, "stone": 1, "fiber": 1}))
-    assert can_craft_hoe(player)
+    workbench = catalog_object("workbench")
+    player = PlayerState(inventory=Counter({"branch": 1, "pebble": 1, "fiber": 1}))
+
+    assert "Craft Crude Hoe" in available_actions(workbench, player)
     player.inventory["fiber"] = 0
-    assert not can_craft_hoe(player)
+    assert "Craft Crude Hoe" not in available_actions(workbench, player)
 
 
 def test_workbench_only_offers_crafting_when_recipe_is_available() -> None:
-    workbench = WorldObject("bench", "Workbench", ObjectKind.WORKBENCH, 0, 0, 32, 32)
+    workbench = catalog_object("workbench")
     player = PlayerState()
 
     assert available_actions(workbench, player) == []
-    player.inventory.update({"stick": 1, "stone": 1, "fiber": 1})
+    player.inventory.update({"branch": 1, "pebble": 1, "fiber": 1})
     assert available_actions(workbench, player) == ["Craft Crude Hoe"]
     player.has_hoe = True
     assert available_actions(workbench, player) == []
 
 
-def test_prepared_field_can_be_planted_when_seed_is_available() -> None:
-    player = PlayerState(inventory=Counter({"seed": 1}))
-    field = WorldObject("field", "Field", ObjectKind.FIELD, 0, 0, 10, 10, state="prepared")
-    assert available_actions(field, player) == ["Plant Wheat"]
+def test_mature_wheat_exposes_its_variant_loot() -> None:
+    crop = catalog_object("crop", form_id="mature", variant="wheat")
+
+    assert available_actions(crop, PlayerState()) == ["Harvest Wheat"]
+    assert crop.interactions["Harvest Wheat"]["loot"]["wheat"] == {"grains": 3}
 
 
-def test_berry_bush_offers_an_explicit_harvest_action() -> None:
-    bush = WorldObject("bush", "Berry Bush", ObjectKind.BERRY_BUSH, 0, 0, 28, 28)
+def test_berry_bush_offers_explicit_harvest_actions() -> None:
+    bush = catalog_object("bush", variant="berry")
 
     assert available_actions(bush, PlayerState()) == [
         "Harvest Berries",
@@ -47,47 +76,41 @@ def test_berry_bush_offers_an_explicit_harvest_action() -> None:
 
 
 def test_tree_only_offers_one_branch() -> None:
-    tree = WorldObject("tree", "Tree", ObjectKind.TREE, 0, 0, 30, 38)
+    tree = catalog_object(
+        "tree", form_id="standing", state={"branch_taken": False}
+    )
 
     assert available_actions(tree, PlayerState()) == ["Break Off Branch"]
-    tree.state = "branch_taken"
+    tree.state["branch_taken"] = True
     assert available_actions(tree, PlayerState()) == []
 
 
-def test_axe_recipe_and_tree_chopping_action() -> None:
-    player = PlayerState(inventory=Counter({"stick": 1, "stone": 2, "fiber": 1}))
-    tree = WorldObject("tree", "Tree", ObjectKind.TREE, 0, 0, 30, 38, state="branch_taken")
+def test_tree_chopping_requires_a_carried_chopping_item() -> None:
+    tree = catalog_object(
+        "tree", form_id="standing", state={"branch_taken": True}
+    )
+    player = PlayerState()
 
-    assert can_craft_axe(player)
     assert available_actions(tree, player) == []
-    player.has_axe = True
-    player.carrying_axe = True
-    assert not can_craft_axe(player)
+    axe = catalog_object("axe", container="player")
+    player.carried_objects.append(axe)
     assert available_actions(tree, player) == ["Chop Down Tree"]
 
 
-def test_workbench_notification_requires_a_new_craftable_tool() -> None:
-    player = PlayerState(inventory=Counter({"stick": 1, "stone": 1, "fiber": 1}))
-    assert has_new_craftable_tool(player)
+def test_workbench_notification_inputs_come_from_catalog_actions() -> None:
+    workbench = catalog_object("workbench")
+    player = PlayerState(inventory=Counter({"branch": 1, "pebble": 1, "fiber": 1}))
 
+    assert available_actions(workbench, player) == ["Craft Crude Hoe"]
     player.has_hoe = True
-    assert not has_new_craftable_tool(player)
-    player.inventory["stone"] = 2
-    assert has_new_craftable_tool(player)
-
+    player.inventory["pebble"] = 2
+    assert available_actions(workbench, player) == ["Craft Crude Axe"]
     player.has_axe = True
-    assert not has_new_craftable_tool(player)
-
     player.inventory.update({"wood": 2, "fiber": 1})
-    assert can_craft_bucket(player)
-    assert has_new_craftable_tool(player)
-    player.has_bucket = True
-    assert not can_craft_bucket(player)
-    assert not has_new_craftable_tool(player)
-
+    assert available_actions(workbench, player) == ["Craft Wooden Bucket"]
+    player.carried_objects.append(catalog_object("bucket", container="player"))
+    player.inventory["wood"] = 0
     player.inventory["fiber"] = 3
-    assert can_craft_basket(player)
-    assert has_new_craftable_tool(player)
-    player.has_basket = True
-    assert not can_craft_basket(player)
-    assert not has_new_craftable_tool(player)
+    assert available_actions(workbench, player) == ["Weave Fiber Basket"]
+    player.carried_objects.append(catalog_object("basket", container="player"))
+    assert available_actions(workbench, player) == []

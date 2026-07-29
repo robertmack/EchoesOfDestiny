@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
-import json
 
+from remembering.coordinates import TilePosition
 from remembering.tiles import TileMap
 
 
@@ -34,20 +34,25 @@ class Mode(Enum):
 
 
 class ObjectKind(Enum):
+    OBJECT = auto()
     BED = auto()
     TABLE = auto()
     FOOD_PREP_STATION = auto()
     WORKBENCH = auto()
     TOOL_STORAGE = auto()
-    STICK = auto()
-    STONE = auto()
+    BRANCH = auto()
+    PEBBLE = auto()
     GRASS = auto()
-    WILD_GRAIN = auto()
-    FIELD = auto()
+    WILD_PLANT = auto()
+    CROP = auto()
     TREE = auto()
     BOULDER = auto()
-    BERRY_BUSH = auto()
+    BUSH = auto()
     BARREL = auto()
+    BUCKET = auto()
+    BASKET = auto()
+    AXE = auto()
+    CUPBOARD = auto()
 
 
 class RoomQuality(Enum):
@@ -58,24 +63,21 @@ class RoomQuality(Enum):
     GREAT = "great"
 
 
-def tree_state_data(state: str) -> dict[str, object]:
-    if state == "branch_taken":
-        return {"form": "tree", "branch_taken": True, "stump_memory_count": 0}
-    if state == "stump":
-        return {"form": "stump", "branch_taken": True, "stump_memory_count": 0}
-    try:
-        loaded = json.loads(state) if state else {}
-    except (json.JSONDecodeError, TypeError):
-        loaded = {}
+def tree_state_data(state: dict[str, object]) -> dict[str, object]:
+    loaded = state
     return {
-        "form": "stump" if loaded.get("form") == "stump" else "tree",
         "branch_taken": bool(loaded.get("branch_taken", False)),
         "stump_memory_count": max(0, int(loaded.get("stump_memory_count", 0))),
+        "persistence_modifier": (
+            float(loaded["persistence_modifier"])
+            if loaded.get("persistence_modifier") is not None
+            else None
+        ),
     }
 
 
-def encode_tree_state(data: dict[str, object]) -> str:
-    return json.dumps(data, separators=(",", ":"))
+def encode_tree_state(data: dict[str, object]) -> dict[str, object]:
+    return dict(data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,24 @@ class RoutineStep:
     secondary_bounds: tuple[int, int, int, int] | None = None
     source_areas: tuple[tuple[int, int, int, int], ...] | None = None
     target_areas: tuple[tuple[int, int, int, int], ...] | None = None
+    target_build_memory: str | None = None
+    max_game_minutes: int | None = None
+    till_until_done: bool = False
+    nearest_to_player: bool = False
+
+
+@dataclass(slots=True)
+class BuildMemory:
+    memory_id: str
+    object_type: str
+    column: int
+    row: int
+    orientation: str = "E/W"
+    quality: int = 20
+    build_count: int = 0
+    persistent: bool = False
+    persistence_modifier: float | None = None
+    state: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -98,8 +118,12 @@ class ObjectState:
     orientation: str = "E/W"
     quality: int = 100
     active: bool = True
-    state: str = ""
+    state: dict[str, object] = field(default_factory=dict)
     persistent: bool = False
+    variant: str | None = None
+    form: str | None = None
+    flavor: str | None = None
+    container: str | None = None
 
 
 @dataclass(slots=True)
@@ -112,23 +136,42 @@ class WorldObject:
     width: int
     height: int
     active: bool = True
-    state: str = ""
+    state: dict[str, object] = field(default_factory=dict)
     blocks_movement: bool = False
+    blocks_vision: bool = False
+    mobility: str = "fixed"
+    traits: tuple[str, ...] = ()
     persistent: bool = False
     descriptions: dict[str, str] = field(default_factory=dict)
+    interactions: dict[str, dict[str, object]] = field(default_factory=dict)
+    capacity: dict[str, int] = field(default_factory=dict)
+    nutrition: int = 0
     type_id: str = ""
     orientation: str = "E/W"
     quality: int = 100
     persistent_state: ObjectState | None = None
     daily_spawned: bool = False
+    variant: str | None = None
+    form: str = ""
+    flavor: str | None = None
+    container: str | None = None
 
     @property
     def center(self) -> tuple[float, float]:
         return self.x + self.width / 2, self.y + self.height / 2
 
+    @property
+    def tile_position(self) -> TilePosition:
+        return TilePosition.from_mapxy(self.center)
+
     def contains(self, point: tuple[int, int]) -> bool:
         px, py = point
-        return self.active and self.x <= px <= self.x + self.width and self.y <= py <= self.y + self.height
+        return (
+            self.active
+            and self.container is None
+            and self.x <= px <= self.x + self.width
+            and self.y <= py <= self.y + self.height
+        )
 
     @property
     def quality_stage(self) -> str:
@@ -148,17 +191,62 @@ class WorldObject:
 
 
 @dataclass(frozen=True, slots=True)
-class ObjectType:
-    type_id: str
-    name: str
-    kind: ObjectKind
+class ObjectForm:
+    form_id: str
+    name: str | None
     descriptions: dict[str, str]
-    width: int
-    height: int
+    footprint: tuple[int, int] = (1, 1)
     blocks_movement: bool = False
+    blocks_vision: bool = False
+    mobility: str = "fixed"
+    traits: tuple[str, ...] = ()
+    interactions: dict[str, dict[str, object]] = field(default_factory=dict)
     spawn_tiles: tuple[str, ...] = ()
     spawn_influence: tuple[tuple[str, float, int, float], ...] = ()
     build_cost: tuple[tuple[str, int], ...] = ()
+    capacity: dict[str, int | dict[str, int]] = field(default_factory=dict)
+    nutrition: int = 0
+    build_duration_seconds: float = 0.0
+    persistence: dict[str, PersistencePolicy] = field(default_factory=dict)
+    states: tuple[str, ...] = ()
+
+    def capacity_for(self, quality: int) -> dict[str, int]:
+        if quality <= 20:
+            stage = "ruined"
+        elif quality <= 40:
+            stage = "damaged"
+        elif quality <= 60:
+            stage = "worn"
+        elif quality <= 79:
+            stage = "good"
+        else:
+            stage = "fine"
+        return {
+            resource: int(value.get(stage, 0) if isinstance(value, dict) else value)
+            for resource, value in self.capacity.items()
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectType:
+    type_id: str
+    name: str
+    variant_names: dict[str, str]
+    kind: ObjectKind
+    default_form: str
+    forms: dict[str, ObjectForm]
+    variants: tuple[str, ...] = ()
+    default_variant: str | None = None
+    state_fields: tuple[str, ...] = ()
+    growth: dict[str, object] = field(default_factory=dict)
+
+    def form_definition(
+        self, form: str | None = None, variant: str | None = None
+    ) -> ObjectForm:
+        return self.forms[form or self.default_form]
+
+    def name_for(self, variant: str | None = None) -> str:
+        return self.variant_names.get(variant or "", self.name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,13 +294,18 @@ class MapStructure:
 class LevelTileState:
     column: int
     row: int
-    till_count: int = 0
+    till_percentage: float = 0.0
     tilled_today: bool = False
-    permanent_kind: str | None = None
-    crop: str | None = None
-    crop_growth: float = 0.0
-    watered: bool = False
-    tended: bool = False
+    soil_persistence_percentage: float = 0.0
+    kind_override: str | None = None
+    persistence_modifier: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PersistencePolicy:
+    chance_per_count: float
+    decay_chance: float
+    modifier_range: tuple[float, float] = (1.0, 1.0)
 
 
 @dataclass(slots=True)
@@ -227,8 +320,13 @@ class MapDefinition:
     tile_map: TileMap
     object_types: dict[str, ObjectType] = field(default_factory=dict)
     tile_states: dict[tuple[int, int], LevelTileState] = field(default_factory=dict)
-    permanent_soil_chance_per_till: float = 0.00001
-    till_count_loss_chance: float = 0.10
+    cheat_memory: tuple[RoutineStep, ...] = ()
+    remembered_routine: tuple[RoutineStep, ...] = ()
+    build_memories: dict[str, BuildMemory] = field(default_factory=dict)
+    till_progress_per_action: float = 5.0
+    soil_persistence_gain: float = 1.0
+    reverted_till_progress_range: tuple[float, float] = (80.0, 100.0)
+    tile_persistence_modifier_range: tuple[float, float] = (1.0, 1.0)
 
 
 @dataclass(slots=True)
@@ -244,11 +342,49 @@ class PlayerState:
     hoe_quality: int = 20
     has_axe: bool = False
     carrying_axe: bool = False
-    has_bucket: bool = False
-    bucket_water_uses: int = 0
-    has_basket: bool = False
+    carried_objects: list[WorldObject] = field(default_factory=list)
     meal_ready: bool = False
     achievements: set[str] = field(default_factory=set)
+
+    @property
+    def tile_position(self) -> TilePosition:
+        return TilePosition.from_mapxy((self.x, self.y))
+
+    @tile_position.setter
+    def tile_position(self, value: TilePosition) -> None:
+        self.x, self.y = value.mapxy
+
+    @property
+    def bucket(self) -> WorldObject | None:
+        return next(
+            (obj for obj in self.carried_objects if obj.type_id == "bucket" and obj.active),
+            None,
+        )
+
+    @property
+    def has_bucket(self) -> bool:
+        return self.bucket is not None
+
+    @property
+    def basket(self) -> WorldObject | None:
+        return next(
+            (obj for obj in self.carried_objects if obj.type_id == "basket" and obj.active),
+            None,
+        )
+
+    @property
+    def has_basket(self) -> bool:
+        return self.basket is not None
+
+    @property
+    def bucket_water_uses(self) -> int:
+        return int(self.bucket.state.get("water_uses", 0)) if self.bucket else 0
+
+    @bucket_water_uses.setter
+    def bucket_water_uses(self, value: int) -> None:
+        if self.bucket is not None:
+            capacity = int(self.bucket.capacity.get("water", 0))
+            self.bucket.state["water_uses"] = max(0, min(capacity, int(value)))
 
     @property
     def bucket_filled(self) -> bool:
@@ -256,7 +392,8 @@ class PlayerState:
 
     @bucket_filled.setter
     def bucket_filled(self, value: bool) -> None:
-        self.bucket_water_uses = 5 if value else 0
+        if self.bucket is not None:
+            self.bucket_water_uses = self.bucket.capacity.get("water", 0) if value else 0
 
 
 @dataclass(slots=True)

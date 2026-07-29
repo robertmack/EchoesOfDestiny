@@ -3,7 +3,9 @@ import json
 
 import pytest
 
-from remembering.model import LevelTileState, ObjectKind, RoomQuality
+from remembering.jsonc import loads_jsonc
+
+from remembering.model import LevelTileState, ObjectKind, RoomQuality, RoutineStep
 from remembering.tiles import TRAVERSABLE_TILE_KINDS, TileEdge, TileKind
 from remembering.world import (
     DEFAULT_CURRENT_LEVEL_PATH,
@@ -13,13 +15,47 @@ from remembering.world import (
     MapLoadError,
     advance_level_tile_states,
     initialize_current_level_from_map,
+    load_memory_file,
     load_map,
+    memory_file_path,
+    save_memory_file,
     save_persistent_objects,
     sync_current_level_from_map,
     structure_wall_rects,
     terrain_blocks_point,
     _spread_spawn_influence,
 )
+
+
+def test_memory_file_round_trip_uses_tile_coordinates(tmp_path) -> None:
+    routine = [
+        RoutineStep(
+            None,
+            "Gather Pebbles",
+            area_bounds=(64, 128, 192, 256),
+            quantity=3,
+            nearest_to_player=True,
+        )
+    ]
+
+    path = save_memory_file(
+        "my routine", routine, tile_size=64, directory=tmp_path
+    )
+    loaded = load_memory_file("my routine.memory", tile_size=64, directory=tmp_path)
+
+    assert path == tmp_path / "my routine.memory"
+    assert loaded == tuple(routine)
+    assert json.loads(path.read_text(encoding="utf-8"))["commands"][0][
+        "area_bounds"
+    ] == {
+        "start": {"tilexy": [1, 2], "subtilexy": [0, 0]},
+        "end": {"tilexy": [3, 4], "subtilexy": [0, 0]},
+    }
+
+
+def test_memory_filename_rejects_paths(tmp_path) -> None:
+    with pytest.raises(MapLoadError, match="safe filename"):
+        memory_file_path("../elsewhere", tmp_path)
 
 
 def test_default_map_loads_authored_structures_and_objects() -> None:
@@ -39,7 +75,7 @@ def test_default_map_loads_authored_structures_and_objects() -> None:
 
 def test_bed_uses_authored_instance_coordinates() -> None:
     map_definition = load_map()
-    map_data = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    map_data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
 
     bed = next(obj for obj in map_definition.objects.values() if obj.type_id == "bed")
     authored = next(instance for instance in map_data["objects"] if instance["type"] == "bed")
@@ -69,12 +105,16 @@ def test_generated_trees_stay_outside_rooms_and_clear_homestead() -> None:
 def test_cardinal_terrain_features_form_impassable_boundaries() -> None:
     map_definition = load_map()
     terrain = {feature.kind: feature for feature in map_definition.terrain}
+    size = map_definition.tile_map.tile_size
 
-    assert terrain_blocks_point(terrain["mountains"], 64 * 32, 5 * 32)
-    assert terrain_blocks_point(terrain["ocean"], 64 * 32, 120 * 32)
-    assert terrain_blocks_point(terrain["dense_forest"], 5 * 32, 64 * 32)
-    assert terrain_blocks_point(terrain["river"], 124 * 32, 74 * 32)
-    assert not any(terrain_blocks_point(feature, 64 * 32, 66 * 32) for feature in terrain.values())
+    assert terrain_blocks_point(terrain["mountains"], 64 * size, 5 * size)
+    assert terrain_blocks_point(terrain["ocean"], 64 * size, 120 * size)
+    assert terrain_blocks_point(terrain["dense_forest"], 5 * size, 64 * size)
+    assert terrain_blocks_point(terrain["river"], 124 * size, 74 * size)
+    assert not any(
+        terrain_blocks_point(feature, 64 * size, 66 * size)
+        for feature in terrain.values()
+    )
 
 
 def test_western_forest_contains_dense_trees_but_other_terrain_does_not() -> None:
@@ -94,14 +134,15 @@ def test_western_forest_contains_dense_trees_but_other_terrain_does_not() -> Non
 def test_world_is_rasterized_into_expected_tile_types() -> None:
     map_definition = load_map()
     tile_map = map_definition.tile_map
+    size = tile_map.tile_size
 
     bed = next(obj for obj in map_definition.objects.values() if obj.type_id == "bed")
     assert tile_map.tile_at_world(*bed.center)[2].kind is TileKind.WOODEN_FLOOR
-    assert tile_map.tile_at_world(64 * 32, 5 * 32)[2].kind is TileKind.MOUNTAIN
-    assert tile_map.tile_at_world(64 * 32, 20 * 32)[2].kind is TileKind.HILLS
-    assert tile_map.tile_at_world(64 * 32, 24 * 32)[2].kind is TileKind.GRASSLAND
-    assert tile_map.tile_at_world(64 * 32, 120 * 32)[2].kind is TileKind.DEEP_WATER
-    assert tile_map.tile_at_world(124 * 32, 74 * 32)[2].kind in {
+    assert tile_map.tile_at_world(64 * size, 5 * size)[2].kind is TileKind.MOUNTAIN
+    assert tile_map.tile_at_world(64 * size, 20 * size)[2].kind is TileKind.HILLS
+    assert tile_map.tile_at_world(64 * size, 24 * size)[2].kind is TileKind.GRASSLAND
+    assert tile_map.tile_at_world(64 * size, 120 * size)[2].kind is TileKind.DEEP_WATER
+    assert tile_map.tile_at_world(124 * size, 74 * size)[2].kind in {
         TileKind.SHALLOW_WATER,
         TileKind.DEEP_WATER,
     }
@@ -123,10 +164,10 @@ def test_large_objects_occupy_every_intersected_tile() -> None:
 
 def test_nonblocking_objects_still_record_tile_occupancy() -> None:
     map_definition = load_map()
-    stone = next(obj for obj in map_definition.objects.values() if obj.type_id == "stone")
-    tile = map_definition.tile_map.tile_at_world(*stone.center)[2]
+    pebble = next(obj for obj in map_definition.objects.values() if obj.type_id == "pebble")
+    tile = map_definition.tile_map.tile_at_world(*pebble.center)[2]
 
-    assert f"object:{stone.object_id}" in tile.properties
+    assert f"object:{pebble.object_id}" in tile.properties
     assert "blocked" not in tile.properties
 
 
@@ -146,6 +187,31 @@ def test_room_wall_edges_are_closed_and_door_edges_are_open() -> None:
     assert common_door.passable[TileEdge.WEST] is True
 
 
+def test_blocking_objects_do_not_create_rendered_wall_markers() -> None:
+    map_definition = load_map()
+    table = next(
+        obj for obj in map_definition.objects.values() if obj.type_id == "table"
+    )
+    tile_map = map_definition.tile_map
+    first_column = table.x // tile_map.tile_size
+    first_row = table.y // tile_map.tile_size
+    occupied = [
+        tile_map.tile_at(column, row)
+        for row in range(
+            first_row, (table.y + table.height - 1) // tile_map.tile_size + 1
+        )
+        for column in range(
+            first_column, (table.x + table.width - 1) // tile_map.tile_size + 1
+        )
+    ]
+
+    assert all(not all(tile.passable.values()) for tile in occupied)
+    assert all(
+        not any(property_.startswith("wall:") for property_ in tile.properties)
+        for tile in occupied
+    )
+
+
 def test_house_and_workshop_are_separate_building_groups() -> None:
     map_definition = load_map()
     rooms_by_id = {room.structure_id: room for room in map_definition.structures}
@@ -162,9 +228,12 @@ def test_level_is_128_tiles_square_and_river_hugs_eastern_edge() -> None:
 
     assert map_definition.tile_map.columns == 128
     assert map_definition.tile_map.rows == 128
-    assert map_definition.width == 4096
-    assert map_definition.height == 4096
-    assert max(x for x, _ in river.points) + river.width / 2 >= map_definition.width - 64
+    assert map_definition.width == 128 * map_definition.tile_map.tile_size
+    assert map_definition.height == 128 * map_definition.tile_map.tile_size
+    assert (
+        max(x for x, _ in river.points) + river.width / 2
+        >= map_definition.width - 2 * map_definition.tile_map.tile_size
+    )
 
 
 def test_common_room_wall_geometry_leaves_exterior_door_open() -> None:
@@ -200,7 +269,7 @@ def test_map_loader_reports_invalid_json(tmp_path) -> None:
 
 
 def test_map_loader_rejects_invalid_room_color(tmp_path) -> None:
-    data = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
     bedroom = next(structure for structure in data["structures"] if structure["id"] == "bedroom")
     bedroom["display_color"] = [300, 80]
     map_path = tmp_path / "invalid-color.json"
@@ -211,16 +280,16 @@ def test_map_loader_rejects_invalid_room_color(tmp_path) -> None:
 
 
 def test_map_file_is_valid_formatted_json() -> None:
-    data = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
 
     assert data["objects"]
     assert data["structures"]
 
 
 def test_current_level_has_persistent_and_current_state_for_each_instance() -> None:
-    data = json.loads(DEFAULT_CURRENT_LEVEL_PATH.read_text(encoding="utf-8"))
+    data = loads_jsonc(DEFAULT_CURRENT_LEVEL_PATH.read_text(encoding="utf-8"))
 
-    assert data["level_map"] == "homestead.json"
+    assert data["level_map"] == "homestead.jsonc"
     assert data["objects"]
     assert all("persistent_state" in entry and "current_state" in entry for entry in data["objects"])
     assert all(
@@ -230,26 +299,26 @@ def test_current_level_has_persistent_and_current_state_for_each_instance() -> N
 
 
 def test_f5_sync_upserts_authored_instances_without_removing_runtime_instances(tmp_path) -> None:
-    map_data = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    map_data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
     bed = next(instance for instance in map_data["objects"] if instance["id"] == 1)
     bed["x"] = 66
-    map_path = tmp_path / "homestead.json"
+    map_path = tmp_path / "homestead.jsonc"
     map_path.write_text(json.dumps(map_data), encoding="utf-8")
-    current_data = json.loads(DEFAULT_CURRENT_LEVEL_PATH.read_text(encoding="utf-8"))
+    current_data = loads_jsonc(DEFAULT_CURRENT_LEVEL_PATH.read_text(encoding="utf-8"))
     current_data["tiles"] = [{"x": 20, "y": 20, "till_count": 3, "tilled_today": False}]
     current_data["objects"].append(
         {
             "id": 999,
-            "type": "stone",
+            "type": "pebble",
             "persistent_state": {"persistent": False, "x": 500, "y": 500, "orientation": "E/W", "quality": 50, "active": True, "state": ""},
             "current_state": {"x": 500, "y": 500, "orientation": "E/W", "quality": 50, "active": True, "state": ""},
         }
     )
-    current_path = tmp_path / "current_level.json"
+    current_path = tmp_path / "current_level.jsonc"
     current_path.write_text(json.dumps(current_data), encoding="utf-8")
 
     sync_current_level_from_map(map_path, current_path)
-    synced = json.loads(current_path.read_text(encoding="utf-8"))
+    synced = loads_jsonc(current_path.read_text(encoding="utf-8"))
     synced_by_id = {entry["id"]: entry for entry in synced["objects"]}
 
     assert synced_by_id[1]["persistent_state"]["x"] == 66
@@ -259,12 +328,12 @@ def test_f5_sync_upserts_authored_instances_without_removing_runtime_instances(t
 
 
 def test_startup_initialization_rebuilds_current_level_from_homestead(tmp_path) -> None:
-    current_path = tmp_path / "current_level.json"
+    current_path = tmp_path / "current_level.jsonc"
     current_path.write_text(
         json.dumps(
             {
-                "level_map": "homestead.json",
-                "objects": [{"id": 999, "type": "stone"}],
+                "level_map": "homestead.jsonc",
+                "objects": [{"id": 999, "type": "pebble"}],
                 "tiles": [{"x": 10, "y": 10, "crop": "wheat"}],
             }
         ),
@@ -272,8 +341,8 @@ def test_startup_initialization_rebuilds_current_level_from_homestead(tmp_path) 
     )
 
     initialize_current_level_from_map(current_level_path=current_path)
-    initialized = json.loads(current_path.read_text(encoding="utf-8"))
-    authored = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    initialized = loads_jsonc(current_path.read_text(encoding="utf-8"))
+    authored = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
 
     assert initialized["tiles"] == []
     assert {entry["id"] for entry in initialized["objects"]} == {
@@ -283,19 +352,37 @@ def test_startup_initialization_rebuilds_current_level_from_homestead(tmp_path) 
 
 
 def test_map_instances_reference_master_object_catalog() -> None:
-    map_data = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
-    catalog_data = json.loads(DEFAULT_OBJECT_TYPES_PATH.read_text(encoding="utf-8"))
+    map_data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    catalog_data = loads_jsonc(DEFAULT_OBJECT_TYPES_PATH.read_text(encoding="utf-8"))
     type_ids = {entry["id"] for entry in catalog_data["object_types"]}
 
-    assert all(set(instance) <= {"id", "type", "x", "y", "orientation", "quality", "width", "height", "active", "state"} for instance in map_data["objects"])
+    assert all(
+        set(instance)
+        <= {
+            "id",
+            "type",
+            "variant",
+            "x",
+            "y",
+            "orientation",
+            "quality",
+            "width",
+            "height",
+            "active",
+            "state",
+        }
+        for instance in map_data["objects"]
+    )
     assert all(instance["type"] in type_ids for instance in map_data["objects"])
     assert all(isinstance(instance["id"], int) and instance["id"] > 0 for instance in map_data["objects"])
     assert all("persistent" not in object_type for object_type in catalog_data["object_types"])
     assert len({instance["id"] for instance in map_data["objects"]}) == len(map_data["objects"])
     assert next(obj for obj in load_map().objects.values() if obj.type_id == "bed").description
     assert all(
-        set(object_type.descriptions) == {"ruined", "damaged", "worn", "good", "fine"}
+        not form.descriptions
+        or set(form.descriptions) == {"ruined", "damaged", "worn", "good", "fine"}
         for object_type in load_map().object_types.values()
+        for form in object_type.forms.values()
     )
 
 
@@ -321,7 +408,7 @@ def test_object_description_tracks_numeric_quality() -> None:
 
 
 def test_orientation_rotates_rectangular_footprint_and_quality_is_derived(tmp_path) -> None:
-    data = json.loads(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
     bed = next(instance for instance in data["objects"] if instance["type"] == "bed")
     bed["orientation"] = "N/S"
     bed["quality"] = 20
@@ -332,39 +419,81 @@ def test_orientation_rotates_rectangular_footprint_and_quality_is_derived(tmp_pa
         obj for obj in load_map(map_path, persistence_path=None).objects.values() if obj.type_id == "bed"
     )
 
-    assert (rotated_bed.width, rotated_bed.height) == (32, 64)
+    assert (rotated_bed.width, rotated_bed.height) == (64, 128)
     assert rotated_bed.quality_stage == "ruined"
 
 
 def test_persistent_objects_round_trip_separately_from_map(tmp_path) -> None:
-    persistence_path = tmp_path / "current_level.json"
+    persistence_path = tmp_path / "current_level.jsonc"
     original = load_map()
-    original_stick = next(obj for obj in original.objects.values() if obj.type_id == "stick")
-    original_stone = next(obj for obj in original.objects.values() if obj.type_id == "stone")
+    original_branch = next(obj for obj in original.objects.values() if obj.type_id == "branch")
+    original_pebble = next(obj for obj in original.objects.values() if obj.type_id == "pebble")
     original_bed = next(obj for obj in original.objects.values() if obj.type_id == "bed")
-    original_stick.active = False
-    original_stone.quality = 1
+    original_branch.active = False
+    original_pebble.quality = 1
     original_bed.state = "repaired"
 
     save_persistent_objects(original.objects, persistence_path)
-    saved_data = json.loads(persistence_path.read_text(encoding="utf-8"))
+    saved_data = loads_jsonc(persistence_path.read_text(encoding="utf-8"))
     reloaded = load_map(persistence_path=persistence_path, reset_for_morning=True)
 
-    reloaded_stick = next(obj for obj in reloaded.objects.values() if obj.type_id == "stick")
-    reloaded_stone = next(obj for obj in reloaded.objects.values() if obj.type_id == "stone")
+    reloaded_branch = next(obj for obj in reloaded.objects.values() if obj.type_id == "branch")
+    reloaded_pebble = next(obj for obj in reloaded.objects.values() if obj.type_id == "pebble")
     reloaded_bed = next(obj for obj in reloaded.objects.values() if obj.type_id == "bed")
-    assert reloaded_stick.active is True
-    assert reloaded_stone.quality == 91
-    assert reloaded_bed.state == ""
+    assert reloaded_branch.active is True
+    assert reloaded_pebble.quality == 91
+    assert reloaded_bed.state == {}
     assert reloaded_bed.description == original_bed.description
     assert next(entry for entry in saved_data["objects"] if entry["id"] == original_bed.object_id)["type"] == "bed"
-    saved_stick = next(entry for entry in saved_data["objects"] if entry["id"] == original_stick.object_id)
-    assert saved_stick["persistent_state"]["active"] is True
+    saved_branch = next(entry for entry in saved_data["objects"] if entry["id"] == original_branch.object_id)
+    assert saved_branch["persistent_state"]["active"] is True
     assert any(entry["type"] == "tree" for entry in saved_data["objects"])
 
 
+def test_remembered_routine_round_trips_and_survives_level_initialization(
+    tmp_path,
+) -> None:
+    persistence_path = tmp_path / "current_level.jsonc"
+    original = load_map(persistence_path=None)
+    routine = [
+        RoutineStep(
+            None,
+            "Gather Pebbles",
+            area_bounds=(64, 128, 256, 320),
+            quantity=4,
+            target_areas=((64, 128, 128, 192), (192, 256, 256, 320)),
+        ),
+        RoutineStep(
+            1,
+            "Gather",
+            "branch",
+            target_point=(448.0, 512.0),
+        ),
+    ]
+
+    save_persistent_objects(
+        original.objects,
+        persistence_path,
+        tile_size=original.tile_map.tile_size,
+        remembered_routine=routine,
+    )
+    initialize_current_level_from_map(current_level_path=persistence_path)
+    reloaded = load_map(persistence_path=persistence_path)
+
+    assert reloaded.remembered_routine == tuple(routine)
+    saved = loads_jsonc(persistence_path.read_text(encoding="utf-8"))
+    assert saved["remembered_routine"][0]["area_bounds"] == {
+        "start": {"tilexy": [1, 2], "subtilexy": [0, 0]},
+        "end": {"tilexy": [4, 5], "subtilexy": [0, 0]},
+    }
+    assert saved["remembered_routine"][1]["target_point"] == {
+        "tilexy": [7, 8],
+        "subtilexy": [0.0, 0.0],
+    }
+
+
 def test_sparse_tile_state_round_trips_through_current_level(tmp_path) -> None:
-    current_path = tmp_path / "current_level.json"
+    current_path = tmp_path / "current_level.jsonc"
     original = load_map()
     column, row = next(
         (column, row)
@@ -374,8 +503,13 @@ def test_sparse_tile_state_round_trips_through_current_level(tmp_path) -> None:
         and not original.tile_map.tile_at(column, row).properties
     )
     state = LevelTileState(
-        column, row, till_count=4, tilled_today=True, crop="wheat",
-        crop_growth=0.5, watered=True, tended=True,
+        column,
+        row,
+        till_percentage=42.5,
+        tilled_today=True,
+        soil_persistence_percentage=37.5,
+        kind_override=TileKind.SOIL.value,
+        persistence_modifier=1.1,
     )
     original.tile_states[(column, row)] = state
 
@@ -388,29 +522,28 @@ def test_sparse_tile_state_round_trips_through_current_level(tmp_path) -> None:
     reloaded = load_map(persistence_path=current_path)
 
     restored = reloaded.tile_states[(column, row)]
-    assert restored.till_count == 4
+    assert restored.till_percentage == 42.5
     assert restored.tilled_today is True
-    assert restored.crop == "wheat"
-    assert restored.crop_growth == 0.5
-    assert restored.watered is True
-    assert restored.tended is True
+    assert restored.soil_persistence_percentage == 37.5
+    assert restored.kind_override == TileKind.SOIL.value
+    assert restored.persistence_modifier == 1.1
     assert reloaded.tile_map.tile_at(column, row).kind is TileKind.SOIL
 
 
 def test_old_live_save_entries_do_not_replace_new_persistent_baseline(tmp_path) -> None:
-    persistence_path = tmp_path / "current_level.json"
+    persistence_path = tmp_path / "current_level.jsonc"
     persistence_path.write_text(
-        json.dumps({"objects": [{"id": "stick_1", "type": "stick", "x": 1213, "y": 1062, "active": False}]}),
+        json.dumps({"objects": [{"id": "branch_1", "type": "branch", "x": 1213, "y": 1062, "active": False}]}),
         encoding="utf-8",
     )
 
     reloaded = load_map(persistence_path=persistence_path, reset_for_morning=True)
 
-    assert next(obj for obj in reloaded.objects.values() if obj.type_id == "stick").active is True
+    assert next(obj for obj in reloaded.objects.values() if obj.type_id == "branch").active is True
 
 
 def test_nonpersistent_instance_keeps_live_state_across_days(tmp_path) -> None:
-    persistence_path = tmp_path / "current_level.json"
+    persistence_path = tmp_path / "current_level.jsonc"
     original = load_map(persistence_path=None)
     tree = next(obj for obj in original.objects.values() if obj.type_id == "tree")
     tree.active = False
@@ -424,19 +557,19 @@ def test_nonpersistent_instance_keeps_live_state_across_days(tmp_path) -> None:
 
 
 def test_grassland_daily_spawn_chances_are_authored_in_tile_catalog() -> None:
-    data = json.loads(DEFAULT_TILE_TYPES_PATH.read_text(encoding="utf-8"))
+    data = loads_jsonc(DEFAULT_TILE_TYPES_PATH.read_text(encoding="utf-8"))
     chances = data["tile_types"]["grassland"]["spawn_chances"]
 
     assert chances == {
         "pebble": 0.05,
-        "wheat": 0.04,
+        "wild_plant": 0.04,
         "branch": 0.05,
-        "berry_bush": 0.02,
+        "bush": 0.02,
         "grass": 0.10,
     }
     assert data["tile_types"]["hills"]["spawn_chances"]["pebble"] == 0.12
     assert {influence["type"] for influence in data["tile_types"]["pond"]["spawn_influence"]} == {
-        "berry_bush",
+        "bush",
         "grass",
     }
     for water_kind in ("pond", "shallow_water", "deep_water"):
@@ -449,8 +582,8 @@ def test_tall_grass_fits_inside_one_tile() -> None:
     map_definition = load_map(persistence_path=None)
     grass = map_definition.object_types["grass"]
 
-    assert grass.width < map_definition.tile_map.tile_size
-    assert grass.height < map_definition.tile_map.tile_size
+    form = grass.form_definition()
+    assert form.footprint == (1, 1)
 
 
 def test_spawn_influence_distance_and_decay_scale_the_boost_per_tile() -> None:
@@ -464,71 +597,80 @@ def test_spawn_influence_distance_and_decay_scale_the_boost_per_tile() -> None:
 
 
 def test_tilling_progress_can_become_permanent_or_decay_when_neglected() -> None:
-    worked = LevelTileState(10, 10, till_count=3, tilled_today=True)
-    states = {(10, 10): worked}
+    used = LevelTileState(
+        10,
+        10,
+        till_percentage=100.0,
+        soil_persistence_percentage=100.0,
+        kind_override=TileKind.SOIL.value,
+    )
+    unused = LevelTileState(
+        11, 10, till_percentage=100.0, kind_override=TileKind.SOIL.value
+    )
+    progress = LevelTileState(12, 10, till_percentage=25.0, tilled_today=True)
+    states = {(10, 10): used, (11, 10): unused, (12, 10): progress}
 
     advance_level_tile_states(
         states,
         day_number=1,
-        permanent_chance_per_till=1.0,
-        till_count_loss_chance=0.0,
+        reverted_till_progress_range=(80.0, 100.0),
     )
-    assert worked.permanent_kind == "soil"
-    assert worked.tilled_today is False
-
-    neglected = LevelTileState(11, 10, till_count=3)
-    states[(11, 10)] = neglected
-    advance_level_tile_states(
-        states,
-        day_number=2,
-        permanent_chance_per_till=0.0,
-        till_count_loss_chance=1.0,
-    )
-    assert neglected.till_count == 2
-
-    planted = LevelTileState(12, 10, permanent_kind="soil", crop="wheat")
-    states[(12, 10)] = planted
-    advance_level_tile_states(
-        states,
-        day_number=3,
-        permanent_chance_per_till=0.0,
-        till_count_loss_chance=0.0,
-    )
-    assert planted.permanent_kind == "soil"
-    assert planted.crop is None
-    assert planted.crop_growth == 0.0
-
-    temporary_crop = LevelTileState(
-        13, 10, till_count=1, tilled_today=True, crop="wheat"
-    )
-    states[(13, 10)] = temporary_crop
-    advance_level_tile_states(
-        states,
-        day_number=4,
-        permanent_chance_per_till=0.0,
-        till_count_loss_chance=0.0,
-    )
-    assert temporary_crop.permanent_kind is None
-    assert temporary_crop.tilled_today is False
-    assert temporary_crop.crop is None
-    assert temporary_crop.crop_growth == 0
+    assert used.kind_override == TileKind.SOIL.value
+    assert used.soil_persistence_percentage == 100.0
+    assert unused.kind_override is None
+    assert 80.0 <= unused.till_percentage <= 100.0
+    assert progress.till_percentage == 25.0
+    assert progress.tilled_today is False
 
 
 def test_tilling_probabilities_are_authored_as_percent_conversion() -> None:
-    data = json.loads(DEFAULT_TILE_TYPES_PATH.read_text(encoding="utf-8"))
+    data = loads_jsonc(DEFAULT_TILE_TYPES_PATH.read_text(encoding="utf-8"))
 
     tilling = data["tile_types"]["grassland"]["tilling"]
-    assert tilling["permanent_chance_per_till"] == 0.00001
-    assert tilling["untended_count_loss_chance"] == 0.10
+    assert tilling["progress_per_till"] == 5.0
+    assert tilling["persistence_gain_per_conversion"] == 1.0
+    assert tilling["reverted_till_progress_range"] == [80.0, 100.0]
     assert set(tilling["tracked_fields"]) == {
-        "till_count",
+        "till_percentage",
         "tilled_today",
-        "permanent_kind",
-        "crop",
-        "crop_growth",
-        "watered",
-        "tended",
+        "soil_persistence_percentage",
+        "kind_override",
+        "persistence_modifier",
     }
+    assert tilling["persistence_modifier_range"] == [0.75, 1.25]
+
+
+def test_tilled_tiles_receive_distinct_stable_persistence_affinities() -> None:
+    states = {
+        (column, 10): LevelTileState(
+            column, 10, till_percentage=1.0, tilled_today=True
+        )
+        for column in range(10, 14)
+    }
+
+    advance_level_tile_states(
+        states,
+        day_number=1,
+        reverted_till_progress_range=(80.0, 100.0),
+        persistence_modifier_range=(0.75, 1.25),
+    )
+    first_values = {
+        key: state.persistence_modifier for key, state in states.items()
+    }
+
+    assert all(0.75 <= value <= 1.25 for value in first_values.values())
+    assert len(set(first_values.values())) > 1
+
+    advance_level_tile_states(
+        states,
+        day_number=2,
+        reverted_till_progress_range=(80.0, 100.0),
+        persistence_modifier_range=(0.75, 1.25),
+    )
+
+    assert {
+        key: state.persistence_modifier for key, state in states.items()
+    } == first_values
 
 
 def test_daily_population_changes_by_day_and_branches_spawn_near_trees() -> None:
@@ -540,13 +682,28 @@ def test_daily_population_changes_by_day_and_branches_spawn_near_trees() -> None
     second_layout = {(obj.type_id, obj.x, obj.y) for obj in second_spawns}
 
     assert first_layout != second_layout
-    assert {"pebble", "wheat", "branch", "berry_bush"} <= {obj.type_id for obj in first_spawns}
+    assert {"pebble", "wild_plant", "branch", "bush"} <= {
+        obj.type_id for obj in first_spawns
+    }
+    wheat = next(obj for obj in first_spawns if obj.type_id == "wild_plant")
+    assert wheat.variant == "wheat"
+    assert wheat.name == "Wild Wheat"
     trees = [obj for obj in first_day.objects.values() if obj.type_id == "tree"]
     branches = [obj for obj in first_spawns if obj.type_id == "branch"]
-    assert first_day.object_types["tree"].spawn_influence == (("branch", 0.35, 5, 0.75),)
+    assert first_day.object_types[
+        "tree"
+    ].form_definition("standing").spawn_influence == (("branch", 0.35, 5, 0.75),)
     assert len(branches) >= 100
-    assert any(min(math.dist(branch.center, tree.center) for tree in trees) < 100 for branch in branches)
-    ground_spawns = [obj for obj in first_spawns if obj.type_id in {"pebble", "wheat"}]
+    assert any(
+        min(math.dist(branch.center, tree.center) for tree in trees)
+        < 100 / 32 * first_day.tile_map.tile_size
+        for branch in branches
+    )
+    ground_spawns = [
+        obj
+        for obj in first_spawns
+        if obj.type_id in {"pebble", "wild_plant"}
+    ]
     assert all(
         first_day.tile_map.tile_at_world(*obj.center)[2].kind in {TileKind.GRASSLAND, TileKind.HILLS}
         for obj in ground_spawns
@@ -556,7 +713,11 @@ def test_daily_population_changes_by_day_and_branches_spawn_near_trees() -> None
 def test_ponds_are_traversable_and_boost_nearby_berry_bushes() -> None:
     map_definition = load_map(day_number=1)
     ponds = [feature for feature in map_definition.terrain if feature.kind == "pond"]
-    berry_bushes = [obj for obj in map_definition.objects.values() if obj.type_id == "berry_bush"]
+    berry_bushes = [
+        obj
+        for obj in map_definition.objects.values()
+        if obj.type_id == "bush" and obj.variant == "berry"
+    ]
 
     assert len(ponds) == 2
     assert map_definition.tile_map.tile_at(39, 40).kind is TileKind.POND
@@ -589,5 +750,11 @@ def test_boulders_are_persistent_and_increase_nearby_pebble_chance() -> None:
 
     assert len(boulders) == 4
     assert all(boulder.persistent for boulder in boulders)
-    assert map_definition.object_types["boulder"].spawn_influence == (("pebble", 0.18, 2, 1.0),)
-    assert any(min(math.dist(pebble.center, boulder.center) for boulder in boulders) < 100 for pebble in pebbles)
+    assert map_definition.object_types[
+        "boulder"
+    ].form_definition().spawn_influence == (("pebble", 0.18, 2, 1.0),)
+    assert any(
+        min(math.dist(pebble.center, boulder.center) for boulder in boulders)
+        < 100 / 32 * map_definition.tile_map.tile_size
+        for pebble in pebbles
+    )

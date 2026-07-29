@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from remembering.coordinates import MapXY, ScreenXY
+
 
 @dataclass(slots=True)
 class Camera:
@@ -15,14 +17,19 @@ class Camera:
     min_zoom: float = 0.5
     max_zoom: float = 2.0
     dead_zone_ratio: float = 0.3
+    world_scale: float = 1.0
 
-    def world_to_screen(self, point: tuple[float, float]) -> tuple[int, int]:
+    @property
+    def effective_zoom(self) -> float:
+        return self.zoom / self.world_scale
+
+    def map_to_screen(self, point: MapXY) -> ScreenXY:
         return (
-            round(self.viewport_left + (point[0] - self.x) * self.zoom),
-            round(self.viewport_top + (point[1] - self.y) * self.zoom),
+            round(self.viewport_left + (point[0] - self.x) * self.effective_zoom),
+            round(self.viewport_top + (point[1] - self.y) * self.effective_zoom),
         )
 
-    def screen_to_world(self, point: tuple[int, int]) -> tuple[int, int] | None:
+    def screen_to_map(self, point: ScreenXY) -> MapXY | None:
         screen_x, screen_y = point
         if not (
             self.viewport_left <= screen_x < self.viewport_left + self.viewport_width
@@ -30,9 +37,17 @@ class Camera:
         ):
             return None
         return (
-            round(self.x + (screen_x - self.viewport_left) / self.zoom),
-            round(self.y + (screen_y - self.viewport_top) / self.zoom),
+            self.x + (screen_x - self.viewport_left) / self.effective_zoom,
+            self.y + (screen_y - self.viewport_top) / self.effective_zoom,
         )
+
+    # Compatibility names while callers migrate. These values are logical map
+    # units (64 per tile), never pixels in an asset or framebuffer.
+    def world_to_screen(self, point: MapXY) -> ScreenXY:
+        return self.map_to_screen(point)
+
+    def screen_to_world(self, point: ScreenXY) -> MapXY | None:
+        return self.screen_to_map(point)
 
     def set_zoom(
         self,
@@ -41,16 +56,16 @@ class Camera:
         world_size: tuple[int, int],
     ) -> None:
         anchor_x, anchor_y = anchor_screen
-        world_x = self.x + (anchor_x - self.viewport_left) / self.zoom
-        world_y = self.y + (anchor_y - self.viewport_top) / self.zoom
+        world_x = self.x + (anchor_x - self.viewport_left) / self.effective_zoom
+        world_y = self.y + (anchor_y - self.viewport_top) / self.effective_zoom
         self.zoom = max(self.min_zoom, min(zoom, self.max_zoom))
-        self.x = world_x - (anchor_x - self.viewport_left) / self.zoom
-        self.y = world_y - (anchor_y - self.viewport_top) / self.zoom
+        self.x = world_x - (anchor_x - self.viewport_left) / self.effective_zoom
+        self.y = world_y - (anchor_y - self.viewport_top) / self.effective_zoom
         self.clamp(world_size)
 
     def center_on(self, target: tuple[float, float], world_size: tuple[int, int]) -> None:
-        self.x = target[0] - self.viewport_width / self.zoom / 2
-        self.y = target[1] - self.viewport_height / self.zoom / 2
+        self.x = target[0] - self.viewport_width / self.effective_zoom / 2
+        self.y = target[1] - self.viewport_height / self.effective_zoom / 2
         self.clamp(world_size)
 
     def pan_by_screen(
@@ -59,14 +74,14 @@ class Camera:
         world_size: tuple[int, int],
     ) -> None:
         """Move the viewed world by a screen-space drag delta."""
-        self.x -= delta[0] / self.zoom
-        self.y -= delta[1] / self.zoom
+        self.x -= delta[0] / self.effective_zoom
+        self.y -= delta[1] / self.effective_zoom
         self.clamp(world_size)
 
     def follow(self, target: tuple[float, float], world_size: tuple[int, int]) -> None:
         target_x, target_y = target
-        visible_width = self.viewport_width / self.zoom
-        visible_height = self.viewport_height / self.zoom
+        visible_width = self.viewport_width / self.effective_zoom
+        visible_height = self.viewport_height / self.effective_zoom
         inset_x = visible_width * self.dead_zone_ratio
         inset_y = visible_height * self.dead_zone_ratio
         local_x = target_x - self.x
@@ -84,7 +99,7 @@ class Camera:
 
     def clamp(self, world_size: tuple[int, int]) -> None:
         world_width, world_height = world_size
-        visible_width = self.viewport_width / self.zoom
-        visible_height = self.viewport_height / self.zoom
+        visible_width = self.viewport_width / self.effective_zoom
+        visible_height = self.viewport_height / self.effective_zoom
         self.x = max(0.0, min(self.x, max(0, world_width - visible_width)))
         self.y = max(0.0, min(self.y, max(0, world_height - visible_height)))

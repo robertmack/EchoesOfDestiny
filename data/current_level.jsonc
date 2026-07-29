@@ -1,0 +1,698 @@
+{
+  "level_map": "homestead.jsonc",
+  "remembered_routine": [
+    {
+      "action": "Gather Pebbles",
+      "area_bounds": [
+        57.0,
+        72.0,
+        82.0,
+        88.0
+      ],
+      "quantity": 7,
+      "target_areas": [
+        [
+          57.0,
+          72.0,
+          82.0,
+          88.0
+        ]
+      ]
+    },
+    {
+      "action": "Gather Branches",
+      "area_bounds": [
+        54.0,
+        72.0,
+        81.0,
+        88.0
+      ],
+      "quantity": 7,
+      "target_areas": [
+        [
+          54.0,
+          72.0,
+          81.0,
+          88.0
+        ]
+      ]
+    },
+    {
+      "action": "Gather Tall Grass",
+      "area_bounds": [
+        56.0,
+        72.0,
+        82.0,
+        90.0
+      ],
+      "quantity": 7,
+      "target_areas": [
+        [
+          56.0,
+          72.0,
+          82.0,
+          90.0
+        ]
+      ]
+    },
+    {
+      "action": "Craft Crude Hoe",
+      "target_id": 4,
+      "target_type": "workbench",
+      "target_point": [
+        55.0,
+        66.0
+      ]
+    },
+    {
+      "action": "Craft Crude Axe",
+      "target_id": 4,
+      "target_type": "workbench",
+      "target_point": [
+        55.0,
+        66.0
+      ]
+    },
+    {
+      "action": "Weave Fiber Basket",
+      "target_id": 4,
+      "target_type": "workbench",
+      "target_point": [
+        55.0,
+        66.0
+      ]
+    },
+    {
+      "action": "Chop Trees",
+      "area_bounds": [
+        24.0,
+        80.0,
+        46.0,
+        93.0
+      ],
+      "quantity": 7,
+      "target_areas": [
+        [
+          24.0,
+          80.0,
+          46.0,
+          93.0
+        ]
+      ]
+    },
+    {
+      "action": "Craft Wooden Bucket",
+      "target_id": 4,
+      "target_type": "workbench",
+      "target_point": [
+        55.0,
+        66.0
+      ]
+    },
+    {
+      "action": "Till Grassland",
+      "area_bounds": [
+        72.0,
+        81.0,
+        74.0,
+        83.0
+      ],
+      "target_areas": [
+        [
+          70.0,
+          80.0,
+          74.0,
+          84.0
+        ]
+      ],
+      "max_game_minutes": 120
+    },
+    {
+      "action": "Gather Tall Grass",
+      "area_bounds": [
+        59.0,
+        73.0,
+        85.0,
+        94.0
+      ],
+      "quantity": 7,
+      "target_areas": [
+        [
+          59.0,
+          73.0,
+          85.0,
+          94.0
+        ]
+      ]
+    },
+    {
+      "action": "Build Barrel",
+      "area_bounds": [
+        78.0,
+        81.0,
+        79.0,
+        82.0
+      ],
+      "quantity": 1,
+      "target_areas": [
+        [
+          78.0,
+          81.0,
+          79.0,
+          82.0
+        ]
+      ]
+    },
+    {
+      "action": "Gather Seeds",
+      "area_bounds": [
+        58.0,
+        72.0,
+        84.0,
+        90.0
+      ],
+      "quantity": 16,
+      "target_areas": [
+        [
+          58.0,
+          72.0,
+          84.0,
+          90.0
+        ]
+      ]
+    },
+    {
+      "action": "Plant Wheat",
+      "area_bounds": [
+        70.0,
+        80.0,
+        74.0,
+        84.0
+      ],
+      "quantity": 16,
+      "target_areas": [
+        [
+          70.0,
+          80.0,
+          74.0,
+          84.0
+        ]
+      ]
+    },
+    {
+      "action": "Tend Crops",
+      "area_bounds": [
+        70.0,
+        80.0,
+        74.0,
+        84.0
+      ],
+      "quantity": 16,
+      "target_areas": [
+        [
+          72.0,
+          81.0,
+          74.0,
+          83.0
+        ]
+      ]
+    },
+    {
+      "action": "Water Crops",
+      "area_bounds": [
+        70.0,
+        80.0,
+        74.0,
+        84.0
+      ],
+      "quantity": 16,
+      "secondary_bounds": [
+        87.0,
+        88.0,
+        88.0,
+        89.0
+      ],
+      "source_areas": [
+        [
+          87.0,
+          88.0,
+          88.0,
+          89.0
+        ]
+      ]
+    },
+    {
+      "action": "Fill Barrel",
+      "target_id": 2013363,
+      "target_type": "barrel",
+      "area_bounds": [
+        87.0,
+        88.0,
+        88.0,
+        89.0
+      ],
+      "target_point": [
+        78.5,
+        81.5
+      ],
+      "source_areas": [
+        [
+          87.0,
+          88.0,
+          88.0,
+          89.0
+        ]
+      ],
+      "target_build_memory": "barrel:78:81"
+    }
+  ],
+  "build_memories": [
+    {
+      "id": "barrel:55:72",
+      "object_type": "barrel",
+      "x": 55,
+      "y": 72,
+      "orientation": "E/W",
+      "quality": 20,
+      "build_count": 0,
+      "persistent": false,
+      "persistence_modifier": null,
+      "state": {
+        "water_uses": 0,
+        "build_count": 1,
+        "built_today": false,
+        "build_memory_id": "barrel:55:72",
+        "water_memory": {
+          "observed": 0,
+          "count": 0,
+          "remembered": 0
+        }
+      }
+    },
+    {
+      "id": "barrel:78:81",
+      "object_type": "barrel",
+      "x": 78,
+      "y": 81,
+      "orientation": "E/W",
+      "quality": 20,
+      "build_count": 67,
+      "persistent": true,
+      "persistence_modifier": 0.900126391646507,
+      "state": {
+        "water_uses": 0,
+        "build_count": 67,
+        "built_today": false,
+        "build_memory_id": "barrel:78:81",
+        "persistence_modifier": 0.900126391646507,
+        "water_memory": {
+          "observed": 30,
+          "count": 5,
+          "remembered": 0,
+          "persistence_modifier": 0.8103054765063372
+        },
+        "sprite_state": "empty"
+      }
+    }
+  ],
+  "objects": [
+    {
+      "id": 1,
+      "type": "bed",
+      "persistent_state": {
+        "persistent": true,
+        "x": 61,
+        "y": 66,
+        "orientation": "E/W",
+        "quality": 18,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 61,
+        "y": 66,
+        "orientation": "E/W",
+        "quality": 18,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "persistent_state": {
+        "persistent": true,
+        "x": 69,
+        "y": 65,
+        "orientation": "E/W",
+        "quality": 16,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 69,
+        "y": 65,
+        "orientation": "E/W",
+        "quality": 16,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 3,
+      "type": "food_prep_station",
+      "persistent_state": {
+        "persistent": true,
+        "x": 62,
+        "y": 70,
+        "orientation": "E/W",
+        "quality": 34,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 62,
+        "y": 70,
+        "orientation": "E/W",
+        "quality": 34,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 4,
+      "type": "workbench",
+      "persistent_state": {
+        "persistent": true,
+        "x": 53,
+        "y": 65,
+        "orientation": "E/W",
+        "quality": 19,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 53,
+        "y": 65,
+        "orientation": "E/W",
+        "quality": 19,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 5,
+      "type": "tool_storage",
+      "persistent_state": {
+        "persistent": true,
+        "x": 57,
+        "y": 65,
+        "orientation": "E/W",
+        "quality": 38,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 57,
+        "y": 65,
+        "orientation": "E/W",
+        "quality": 38,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 6,
+      "type": "branch",
+      "persistent_state": {
+        "persistent": true,
+        "x": 70,
+        "y": 66,
+        "orientation": "E/W",
+        "quality": 82,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 70,
+        "y": 66,
+        "orientation": "E/W",
+        "quality": 82,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 7,
+      "type": "pebble",
+      "persistent_state": {
+        "persistent": true,
+        "x": 71,
+        "y": 68,
+        "orientation": "E/W",
+        "quality": 91,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 71,
+        "y": 68,
+        "orientation": "E/W",
+        "quality": 91,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 8,
+      "type": "grass",
+      "persistent_state": {
+        "persistent": true,
+        "x": 82,
+        "y": 66,
+        "orientation": "E/W",
+        "quality": 76,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 82,
+        "y": 66,
+        "orientation": "E/W",
+        "quality": 76,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 9,
+      "type": "wild_plant",
+      "persistent_state": {
+        "persistent": true,
+        "x": 68,
+        "y": 70,
+        "orientation": "E/W",
+        "quality": 68,
+        "active": true,
+        "state": {},
+        "variant": "wheat",
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 68,
+        "y": 70,
+        "orientation": "E/W",
+        "quality": 68,
+        "active": true,
+        "state": {},
+        "variant": "wheat",
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 10,
+      "type": "boulder",
+      "persistent_state": {
+        "persistent": true,
+        "x": 45,
+        "y": 48,
+        "orientation": "E/W",
+        "quality": 94,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 45,
+        "y": 48,
+        "orientation": "E/W",
+        "quality": 94,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 11,
+      "type": "boulder",
+      "persistent_state": {
+        "persistent": true,
+        "x": 82,
+        "y": 45,
+        "orientation": "E/W",
+        "quality": 87,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 82,
+        "y": 45,
+        "orientation": "E/W",
+        "quality": 87,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 12,
+      "type": "boulder",
+      "persistent_state": {
+        "persistent": true,
+        "x": 47,
+        "y": 82,
+        "orientation": "E/W",
+        "quality": 91,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 47,
+        "y": 82,
+        "orientation": "E/W",
+        "quality": 91,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    },
+    {
+      "id": 13,
+      "type": "boulder",
+      "persistent_state": {
+        "persistent": true,
+        "x": 83,
+        "y": 82,
+        "orientation": "E/W",
+        "quality": 83,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      },
+      "current_state": {
+        "x": 83,
+        "y": 82,
+        "orientation": "E/W",
+        "quality": 83,
+        "active": true,
+        "state": {},
+        "variant": null,
+        "form": "",
+        "flavor": null,
+        "container": null
+      }
+    }
+  ],
+  "tiles": []
+}

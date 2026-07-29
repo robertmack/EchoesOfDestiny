@@ -3,7 +3,7 @@ name = "remembering-prototype"
 version = "0.1.0"
 description = "A gray-box prototype about routines, memory, and restoring a forgotten homestead."
 requires-python = ">=3.11"
-dependencies = ["pygame-ce>=2.5,<3"]
+dependencies = ["pygame-ce>=2.5,<3", "Pillow>=11,<13"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
