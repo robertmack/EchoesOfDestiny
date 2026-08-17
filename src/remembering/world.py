@@ -18,6 +18,7 @@ from remembering.model import (
     MapStructure,
     MapTerrain,
     ObjectKind,
+    ObjectMemoryDefinition,
     ObjectForm,
     ObjectState,
     ObjectType,
@@ -363,6 +364,27 @@ def _load_authored_routine(
                 ),
                 till_until_done=bool(entry.get("till_until_done", False)),
                 nearest_to_player=bool(entry.get("nearest_to_player", False)),
+                condition_kind=(
+                    str(entry["condition_kind"])
+                    if entry.get("condition_kind") is not None
+                    else None
+                ),
+                condition_subject=(
+                    str(entry["condition_subject"])
+                    if entry.get("condition_subject") is not None
+                    else None
+                ),
+                condition_operator=str(entry.get("condition_operator", ">=")),
+                condition_value=(
+                    float(entry["condition_value"])
+                    if entry.get("condition_value") is not None
+                    else None
+                ),
+                routine_name=(
+                    str(entry["routine_name"])
+                    if entry.get("routine_name") is not None
+                    else None
+                ),
             )
         )
     return tuple(routine)
@@ -405,6 +427,13 @@ def _routine_payload(
             "max_game_minutes": step.max_game_minutes,
             "till_until_done": step.till_until_done or None,
             "nearest_to_player": step.nearest_to_player or None,
+            "condition_kind": step.condition_kind,
+            "condition_subject": step.condition_subject,
+            "condition_operator": (
+                step.condition_operator if step.condition_kind is not None else None
+            ),
+            "condition_value": step.condition_value,
+            "routine_name": step.routine_name,
         }
         entry.update((key, value) for key, value in optional.items() if value is not None)
         entries.append(entry)
@@ -557,6 +586,7 @@ def load_map(
             tile_spawn_chances,
             tile_spawn_influences,
             tile_sprite_overlays,
+            tile_illness_exposures,
             till_progress_per_action,
             soil_persistence_gain,
             reverted_till_progress_range,
@@ -783,8 +813,10 @@ def load_map(
             tile_map=tile_map,
             boundaries=boundaries,
             object_types=object_types,
+            object_memories=getattr(object_types, "memories", {}),
             tile_states=tile_states,
             tile_sprite_overlays=tile_sprite_overlays,
+            tile_illness_exposures=tile_illness_exposures,
             cheat_memory=_load_authored_routine(data.get("cheat_memory"), tile_size),
             remembered_routine=(
                 load_remembered_routine(persistence_path, tile_size)
@@ -949,9 +981,15 @@ def sync_current_level_from_map(
 class ObjectTypeCatalog(dict[str, ObjectType]):
     """Object definitions with the JSONC-specified fallback for unknown IDs."""
 
-    def __init__(self, definitions: dict[str, ObjectType], defaults: dict[str, Any]):
+    def __init__(
+        self,
+        definitions: dict[str, ObjectType],
+        defaults: dict[str, Any],
+        memories: dict[str, ObjectMemoryDefinition] | None = None,
+    ):
         super().__init__(definitions)
         self.defaults = defaults
+        self.memories = memories or {}
 
     def __missing__(self, type_id: str) -> ObjectType:
         definition = _load_object_type({"id": type_id}, self.defaults)
@@ -1033,6 +1071,7 @@ def _load_object_type(entry: dict[str, Any], defaults: dict[str, Any]) -> Object
             for field, value in inherited.get("state_defaults", {}).items()
         },
         growth=dict(inherited.get("growth", {})),
+        memory_refs=tuple(str(memory_id) for memory_id in inherited.get("memories", [])),
     )
 
 
@@ -1045,6 +1084,20 @@ def load_object_types(path: Path = DEFAULT_OBJECT_TYPES_PATH) -> dict[str, Objec
                 f"Unsupported object catalog schema version {schema_version}"
             )
         defaults = dict(_required(data, "_defaults", "object catalog"))
+        memories = {
+            str(_required(entry, "id", "object memory")): ObjectMemoryDefinition(
+                memory_id=str(_required(entry, "id", "object memory")),
+                text=str(_required(entry, "text", "object memory")),
+                chance=float(entry.get("chance", 1.0)),
+                radius_tiles=float(entry.get("radius_tiles", 3.0)),
+            )
+            for entry in data.get("memories", [])
+        }
+        if any(
+            not 0.0 <= memory.chance <= 1.0 or memory.radius_tiles <= 0
+            for memory in memories.values()
+        ):
+            raise MapLoadError("Object memories must have a valid chance and positive radius")
         definitions = []
         for entry in _required(data, "object_types", "object catalog"):
             definitions.append(_load_object_type(entry, defaults))
@@ -1054,13 +1107,21 @@ def load_object_types(path: Path = DEFAULT_OBJECT_TYPES_PATH) -> dict[str, Objec
         raise MapLoadError("Object catalog contains duplicate type IDs")
     valid_tile_kinds = {kind.value for kind in TileKind}
     for definition in definitions:
+        unknown_memories = set(definition.memory_refs) - set(memories)
+        if unknown_memories:
+            raise MapLoadError(
+                f"Object type {definition.type_id!r} references unknown memories "
+                f"{sorted(unknown_memories)!r}"
+            )
         for form in definition.forms.values():
             if not set(form.spawn_tiles) <= valid_tile_kinds:
                 raise MapLoadError(
                     f"Object type {definition.type_id!r} contains an invalid spawn tile"
                 )
     return ObjectTypeCatalog(
-        {definition.type_id: definition for definition in definitions}, defaults
+        {definition.type_id: definition for definition in definitions},
+        defaults,
+        memories,
     )
 
 
@@ -1086,6 +1147,12 @@ def _load_object_form(form_id: str, entry: dict[str, Any], type_id: str) -> Obje
             f"Object type {type_id!r} has unknown condition recovery "
             f"{sorted(unknown_conditions)!r}"
         )
+    illness_exposures = {
+        str(illness_id): float(chance)
+        for illness_id, chance in entry.get("illness_exposures", {}).items()
+    }
+    if any(not 0.0 <= chance <= 1.0 for chance in illness_exposures.values()):
+        raise MapLoadError(f"Object type {type_id!r} has an invalid illness chance")
     return ObjectForm(
         form_id=form_id,
         # A name dictionary belongs to the object/variant layer. Forms only
@@ -1099,6 +1166,7 @@ def _load_object_form(form_id: str, entry: dict[str, Any], type_id: str) -> Obje
         traits=tuple(str(trait) for trait in entry.get("traits", [])),
         interactions=_load_interactions(entry.get("interactions", {}), type_id, form_id),
         spawn_tiles=tuple(str(kind) for kind in entry.get("spawn_tiles", [])),
+        can_spawn_on_water=bool(entry.get("can_spawn_on_water", False)),
         spawn_influence=tuple(
             (
                 str(_required(influence, "type", "spawn influence")),
@@ -1122,6 +1190,7 @@ def _load_object_form(form_id: str, entry: dict[str, Any], type_id: str) -> Obje
         },
         nutrition=max(0, int(entry.get("nutrition", 0))),
         condition_recovery=condition_recovery,
+        illness_exposures=illness_exposures,
         build_duration_seconds=float(entry.get("build_duration_seconds", 0.0)),
         persistence={
             str(policy_id): _load_persistence_policy(policy, type_id, str(policy_id))
@@ -1255,6 +1324,7 @@ def load_tile_spawn_rules(
     dict[TileKind, dict[str, float]],
     dict[TileKind, tuple[tuple[str, float, int, float], ...]],
     dict[str, tuple[SpriteOverlay, ...]],
+    dict[TileKind, dict[str, float]],
     float,
     float,
     tuple[float, float],
@@ -1265,6 +1335,7 @@ def load_tile_spawn_rules(
         rules: dict[TileKind, dict[str, float]] = {}
         influences: dict[TileKind, tuple[tuple[str, float, int, float], ...]] = {}
         sprite_overlays: dict[str, tuple[SpriteOverlay, ...]] = {}
+        illness_exposures: dict[TileKind, dict[str, float]] = {}
         for kind in TileKind:
             entry = _required(_required(data, "tile_types", "tile catalog"), kind.value, "tile type")
             chances = {str(type_id): float(chance) for type_id, chance in entry.get("spawn_chances", {}).items()}
@@ -1276,6 +1347,15 @@ def load_tile_spawn_rules(
             sprite_overlays[kind.value] = _load_sprite_overlays(
                 entry.get("sprite_overlays", []), f"tile type {kind.value!r}"
             )
+            illness_exposures[kind] = {
+                str(illness_id): float(chance)
+                for illness_id, chance in entry.get("illness_exposures", {}).items()
+            }
+            if any(
+                not 0.0 <= chance <= 1.0
+                for chance in illness_exposures[kind].values()
+            ):
+                raise MapLoadError(f"Invalid illness chance on {kind.value!r}")
             influences[kind] = tuple(
                 (
                     str(_required(influence, "type", "tile spawn influence")),
@@ -1331,6 +1411,7 @@ def load_tile_spawn_rules(
             rules,
             influences,
             sprite_overlays,
+            illness_exposures,
             permanent_chance,
             persistence_gain,
             (float(reverted_range[0]), float(reverted_range[1])),
@@ -1384,7 +1465,7 @@ def _object_from_instance(
         blocks_vision=form.blocks_vision,
         mobility=form.mobility,
         traits=form.traits,
-        persistent=False,
+        persistent=bool(live.get("persistent", False)),
         descriptions=dict(form.descriptions),
         interactions={action: dict(details) for action, details in form.interactions.items()},
         capacity=form.capacity_for(quality),
@@ -1711,6 +1792,11 @@ def _generate_daily_objects(
     seed: int,
     day_number: int,
 ) -> list[WorldObject]:
+    water_tile_kinds = {
+        TileKind.SHALLOW_WATER,
+        TileKind.POND,
+        TileKind.DEEP_WATER,
+    }
     randomizer = random.Random(seed)
     influences: dict[tuple[int, int], dict[str, float]] = {}
     for source_row in range(tile_map.rows):
@@ -1744,7 +1830,14 @@ def _generate_daily_objects(
     for row in range(tile_map.rows):
         for column in range(tile_map.columns):
             tile = tile_map.tile_at(column, row)
-            if tile is None or tile.kind not in TRAVERSABLE_TILE_KINDS or "blocked" in tile.properties:
+            if (
+                tile is None
+                or (
+                    tile.kind not in TRAVERSABLE_TILE_KINDS
+                    and tile.kind not in water_tile_kinds
+                )
+                or "blocked" in tile.properties
+            ):
                 continue
             if any(prop.startswith("object:") for prop in tile.properties):
                 continue
@@ -1754,6 +1847,8 @@ def _generate_daily_objects(
             for type_id, chance in chances.items():
                 definition = object_types[type_id]
                 form = definition.form_definition(variant=definition.default_variant)
+                if tile.kind in water_tile_kinds and not form.can_spawn_on_water:
+                    continue
                 if form.spawn_tiles and tile.kind.value not in form.spawn_tiles:
                     continue
                 if randomizer.random() >= chance:

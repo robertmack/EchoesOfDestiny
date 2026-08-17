@@ -245,6 +245,33 @@ def test_secondary_speeds_use_distinct_geometric_means() -> None:
     assert task_speed_multiplier(player) == pytest.approx(0.1 ** (1 / 3))
 
 
+def test_injured_player_staggers_and_varies_speed_while_following_path() -> None:
+    game = Game(fullscreen=False)
+    door = next(
+        boundary
+        for boundary in game.map.boundaries
+        if boundary.boundary_id == "bedroom_door_1"
+    )
+    door.open = True
+    start = game.map.tile_map.tile_center(66, 64)
+    destination = game.map.tile_map.tile_center(67, 64)
+    game.player.x, game.player.y = start
+    game.player.conditions["trauma"] = 90
+    game.navigation_path = [destination]
+
+    positions = [start]
+    for _ in range(8):
+        assert game.move_along_path(0.05)
+        positions.append((game.player.x, game.player.y))
+
+    step_lengths = [
+        ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        for (x1, y1), (x2, y2) in zip(positions, positions[1:])
+    ]
+    assert any(abs(y - start[1]) > 0.01 for _x, y in positions[1:])
+    assert max(step_lengths) - min(step_lengths) > 0.01
+
+
 def test_harvesting_skill_levels_from_cumulative_xp_and_increases_speed() -> None:
     player = PlayerState()
 
@@ -295,21 +322,21 @@ def test_dawn_condition_memory_moves_ten_percent_toward_targets() -> None:
     assert player.condition_memory["thirst"] == pytest.approx(93.5)
 
 
-def test_power_nap_uses_current_bed_quality_and_consumes_window() -> None:
+def test_power_nap_uses_current_bed_quality_at_any_time() -> None:
     game = Game(fullscreen=False)
     bed = game.object_of_type("bed")
-    game.day.current_time_minutes = 13 * 60
+    game.day.current_time_minutes = 8 * 60
     game.player.conditions["fatigue"] = 82
 
     assert game.queue_job(bed.object_id, "Power Nap", record=True)
-    assert "early" in game.player.used_nap_windows
 
     bed.quality = 40
     game.complete_job(PendingJob(bed.object_id, "Power Nap"))
 
     assert game.player.conditions["fatigue"] == 42
     game.pending_job = None
-    assert not game.queue_job(bed.object_id, "Power Nap", record=True)
+    game.day.current_time_minutes = 23 * 60
+    assert game.queue_job(bed.object_id, "Power Nap", record=True)
 
 
 def test_hourly_needs_and_critical_damage() -> None:

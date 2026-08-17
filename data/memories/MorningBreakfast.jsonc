@@ -1,0 +1,71 @@
+{
+    "_schema_version": 1,
+    "name": "MorningBreakfast",
+    "commands": [
+        {
+            "action": "__routine__",
+            "routine_name": "EatBerries"
+        },
+        {
+            "action": "Eat Porridge",
+            "target_id": 2711,
+            "target_type": "porridge",
+            "target_point": {
+                "tilexy": [
+                    69,
+                    65
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Porridge",
+            "target_type": "table"
+        },
+        {
+            "action": "Move To",
+            "target_point": {
+                "tilexy": [
+                    82,
+                    86
+                ],
+                "subtilexy": [
+                    58.366145544861865,
+                    30.2811054181102
+                ]
+            }
+        },
+        {
+            "action": "__repeat_until__",
+            "condition_kind": "stat",
+            "condition_subject": "hunger",
+            "condition_operator": "<=",
+            "condition_value": 10.0
+        },
+        {
+            "action": "Harvest and Eat Berries",
+            "target_type": "bush",
+            "quantity": 1,
+            "nearest_to_player": true
+        },
+        {
+            "action": "__end__"
+        },
+        {
+            "action": "Drink Until Full",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    91
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        }
+    ]
+}

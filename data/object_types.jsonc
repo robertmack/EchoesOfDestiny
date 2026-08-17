@@ -38,11 +38,13 @@
 //     "states": [],                       // optional named sprite/operating states
 //     "capacity": {},                     // optional resource/container capacity
 //     "condition_recovery": {},           // optional signed condition recovery
+//     "illness_exposures": {},            // optional illness id -> exposure chance
 //     "default_variant": "variant_id",    // optional
 //     "variants": [],                     // optional
 //     "forms": {},                        // optional persistent transformations
 //     "growth": {},                       // optional growth parameters
 //     "spawn_tiles": [],                  // optional world-generation restriction
+//     "can_spawn_on_water": false,        // optional; defaults to false
 //     "spawn_influence": [],              // optional nearby-spawn influence
 //     "build_duration_seconds": 0.0,      // optional
 //     "build_cost": {}                    // optional
@@ -122,6 +124,26 @@
         "traits": [],
         "interactions": {}
     },
+    "memories": [
+        {
+            "id": "porridge_comfort",
+            "text": "Warm porridge. Someone was looking after me.",
+            "chance": 1.0,
+            "radius_tiles": 3
+        },
+        {
+            "id": "porridge_smell",
+            "text": "I remember this smell... oats, maybe?",
+            "chance": 0.75,
+            "radius_tiles": 3
+        },
+        {
+            "id": "missing_table_food",
+            "text": "Didn't there use to be food here, I guess I must have ate it",
+            "chance": 1.0,
+            "radius_tiles": 3
+        }
+    ],
     "object_types": [
         {
             "id": "bed",
@@ -513,16 +535,34 @@
         {
             "id": "porridge",
             "name": "Porridge",
+            "memories": [
+                "porridge_comfort",
+                "porridge_smell"
+            ],
             "mobility": "portable",
             "traits": [
                 "edible"
             ],
+            "interactions": {
+                "eat": [
+                    {
+                        "id": "eat_porridge",
+                        "label": "Eat Porridge"
+                    }
+                ]
+            },
             "nutrition": 30,
             "condition_recovery": {
                 "trauma": 0,
                 "hunger": 30,
                 "thirst": 5,
                 "fatigue": 0
+            },
+            "persistence": {
+                "object": {
+                    "chance_per_count": 0.0,
+                    "decay_chance": 1.0
+                }
             },
             "descriptions": {
                 "ruined": "A miserable bowl of watery porridge, but it is edible.",
@@ -545,6 +585,9 @@
                 "hunger": 8,
                 "thirst": 3,
                 "fatigue": 0
+            },
+            "illness_exposures": {
+                "raw_berry_food_poisoning": 0.02
             },
             "descriptions": {
                 "ruined": "Crushed and spoiled berries.",
@@ -765,14 +808,6 @@
                         "good": "A healthy tree with a broad crown.",
                         "fine": "A magnificent old tree in full vigor."
                     },
-                    "spawn_influence": [
-                        {
-                            "type": "branch",
-                            "chance": 0.35,
-                            "distance": 5,
-                            "decay": 0.75
-                        }
-                    ],
                     "interactions": {
                         "harvest": [
                             {
@@ -834,15 +869,7 @@
                 2,
                 2
             ],
-            "blocks_movement": true,
-            "spawn_influence": [
-                {
-                    "type": "pebble",
-                    "chance": 0.18,
-                    "distance": 2,
-                    "decay": 1.0
-                }
-            ]
+            "blocks_movement": true
         },
         {
             "id": "bush",
@@ -885,6 +912,23 @@
                     {
                         "id": "harvest",
                         "label": "Harvest Berries",
+                        "variants": [
+                            "berry"
+                        ],
+                        "duration_seconds": {
+                            "base": 3.0,
+                            "with_basket": 0.5
+                        },
+                        "availability": "bush_has_berries",
+                        "creates": {
+                            "type": "berry",
+                            "quantity": 1,
+                            "container": "player"
+                        }
+                    },
+                    {
+                        "id": "harvest_and_eat",
+                        "label": "Harvest and Eat Berries",
                         "variants": [
                             "berry"
                         ],
@@ -973,6 +1017,9 @@
             "blocks_movement": true,
             "capacity": {
                 "water": 30
+            },
+            "illness_exposures": {
+                "contaminated_water": 0.0
             },
             "build_duration_seconds": 4.0,
             "build_cost": {

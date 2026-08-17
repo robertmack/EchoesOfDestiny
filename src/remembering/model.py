@@ -95,6 +95,11 @@ class RoutineStep:
     max_game_minutes: int | None = None
     till_until_done: bool = False
     nearest_to_player: bool = False
+    condition_kind: str | None = None
+    condition_subject: str | None = None
+    condition_operator: str = ">="
+    condition_value: float | None = None
+    routine_name: str | None = None
 
 
 @dataclass(slots=True)
@@ -214,11 +219,13 @@ class ObjectForm:
     traits: tuple[str, ...] = ()
     interactions: dict[str, dict[str, object]] = field(default_factory=dict)
     spawn_tiles: tuple[str, ...] = ()
+    can_spawn_on_water: bool = False
     spawn_influence: tuple[tuple[str, float, int, float], ...] = ()
     build_cost: tuple[tuple[str, int], ...] = ()
     capacity: dict[str, int | dict[str, int]] = field(default_factory=dict)
     nutrition: int = 0
     condition_recovery: dict[str, float] = field(default_factory=dict)
+    illness_exposures: dict[str, float] = field(default_factory=dict)
     build_duration_seconds: float = 0.0
     persistence: dict[str, PersistencePolicy] = field(default_factory=dict)
     states: tuple[str, ...] = ()
@@ -242,6 +249,14 @@ class ObjectForm:
 
 
 @dataclass(frozen=True, slots=True)
+class ObjectMemoryDefinition:
+    memory_id: str
+    text: str
+    chance: float = 1.0
+    radius_tiles: float = 3.0
+
+
+@dataclass(frozen=True, slots=True)
 class ObjectType:
     type_id: str
     name: str
@@ -254,6 +269,7 @@ class ObjectType:
     state_fields: tuple[str, ...] = ()
     state_defaults: dict[str, object] = field(default_factory=dict)
     growth: dict[str, object] = field(default_factory=dict)
+    memory_refs: tuple[str, ...] = ()
 
     def form_definition(
         self, form: str | None = None, variant: str | None = None
@@ -350,8 +366,12 @@ class MapDefinition:
     tile_map: TileMap
     boundaries: list[BoundaryObject] = field(default_factory=list)
     object_types: dict[str, ObjectType] = field(default_factory=dict)
+    object_memories: dict[str, ObjectMemoryDefinition] = field(default_factory=dict)
     tile_states: dict[tuple[int, int], LevelTileState] = field(default_factory=dict)
     tile_sprite_overlays: dict[str, tuple[SpriteOverlay, ...]] = field(
+        default_factory=dict
+    )
+    tile_illness_exposures: dict[TileKind, dict[str, float]] = field(
         default_factory=dict
     )
     cheat_memory: tuple[RoutineStep, ...] = ()
@@ -503,8 +523,10 @@ class PlayerState:
 @dataclass(slots=True)
 class DayState:
     number: int = 1
+    attempts: int = 1
     mode: Mode = Mode.MORNING
     remembered_routine: list[RoutineStep] = field(default_factory=list)
     today_routine: list[RoutineStep] = field(default_factory=list)
+    command_history: list[RoutineStep] = field(default_factory=list)
     replay_index: int = 0
     current_time_minutes: int = START_OF_DAY_MINUTES

@@ -150,21 +150,100 @@ def test_selection_and_actions_share_the_left_dock_without_replacing_stats() -> 
     assert game.inventory_page is InventoryPage.INVENTORY
 
 
+def test_healing_and_movement_use_separate_stat_rows(monkeypatch) -> None:
+    game = Game(fullscreen=False)
+    positions: dict[str, tuple[int, int]] = {}
+    original_text = game.text
+
+    def record_text(label, pos, *args, **kwargs):
+        if label.startswith(("Movement:", "Healing:")):
+            positions[label.split(":", 1)[0]] = pos
+        return original_text(label, pos, *args, **kwargs)
+
+    monkeypatch.setattr(game, "text", record_text)
+    game.draw_player_dock()
+
+    assert positions["Movement"][1] == 100
+    assert positions["Healing"][1] == 156
+
+
 def test_regular_command_menu_exposes_macro_controls() -> None:
     game = Game(fullscreen=False)
+    game.active_command_category = "Routines"
 
     game.draw_ui()
     assert [action for _rect, action in game.macro_command_buttons] == [
-        "Start",
+        "Macro Dropdown",
+        "Play",
+        "Record",
         "Edit",
+        "Toggle Moves",
     ]
+
+
+def test_commands_are_nested_and_quantity_only_appears_in_action_submenus() -> None:
+    game = Game(fullscreen=False)
+    game.draw_ui()
+
+    assert [category for _rect, category in game.command_category_buttons] == [
+        "Gather",
+        "Farm",
+        "Build",
+        "Routines",
+    ]
+    assert game.area_quantity_buttons == []
+    assert game.macro_command_buttons == []
+
+    game.active_command_category = "Gather"
+    game.draw_ui()
+    assert len(game.area_quantity_buttons) == 2
+    assert [mode for _rect, mode in game.target_selection_buttons] == [
+        "nearest",
+        "target",
+        "area",
+    ]
+
+    nearest = next(
+        rect for rect, mode in game.target_selection_buttons if mode == "nearest"
+    )
+    pygame.event.post(
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=nearest.center)
+    )
+    game.handle_events()
+    assert game.target_selection_mode == "nearest"
+
+    game.active_command_category = "Routines"
+    game.draw_ui()
+    assert game.area_quantity_buttons == []
+    assert game.target_selection_buttons == []
+    assert any(action == "Play" for _rect, action in game.macro_command_buttons)
 
     game.start_macro_recording()
     game.draw_ui()
     assert [action for _rect, action in game.macro_command_buttons] == [
+        "Macro Dropdown",
+        "Play",
         "Stop",
         "Edit",
+        "Toggle Moves",
     ]
+
+
+def test_r_hotkey_toggles_routine_moves_in_the_right_dock() -> None:
+    game = Game(fullscreen=False)
+
+    pygame.event.post(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r, unicode="r", mod=0)
+    )
+    game.handle_events()
+    assert game.routine_moves_expanded is True
+
+    game.draw_ui()
+    pygame.event.post(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r, unicode="r", mod=0)
+    )
+    game.handle_events()
+    assert game.routine_moves_expanded is False
 
 
 def test_day_planner_starts_with_explore_and_sleep_at_eleven() -> None:
@@ -187,6 +266,31 @@ def test_day_planner_starts_with_explore_and_sleep_at_eleven() -> None:
         "add_activity:power_nap",
         "add_activity:break",
     }
+
+
+def test_day_planner_routine_manager_opens_above_hidden_controls() -> None:
+    game = Game(fullscreen=False)
+    game.day.mode = Mode.MORNING
+    game.day_transition_phase = "planner"
+    game.draw_morning_menu()
+    editor = next(
+        rect
+        for rect, action, _index in game.day_plan_buttons
+        if action == "editor"
+    )
+    # Reproduce an underlying control occupying the same screen area. The
+    # visible planner must own the click.
+    game.pause_button = editor.copy()
+    pygame.event.post(
+        pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN, button=1, pos=editor.center
+        )
+    )
+
+    game.handle_events()
+
+    assert game.adjusting_memory is True
+    assert game.day_transition_phase is None
 
 
 def test_day_planner_conditional_has_indented_addable_command_slots() -> None:
@@ -223,7 +327,6 @@ def test_planner_pauses_between_fade_out_and_wake_fade() -> None:
     game = Game(fullscreen=False)
     game.day_transition_phase = "fade_out"
     game.day_transition_progress = 1.0
-    game.day_transition_prepared = True
 
     game.update_day_transition(0.01)
     assert game.day_transition_phase == "planner"
@@ -245,6 +348,71 @@ def test_planned_routines_begin_replay_and_unpause(monkeypatch) -> None:
     assert game.day.remembered_routine == [command]
     assert game.replay_outcome == "planned_day"
     assert game.simulation_paused is False
+
+
+def test_planned_power_nap_and_sleep_are_replayed_after_macros(monkeypatch) -> None:
+    game = Game(fullscreen=False)
+    macro_command = RoutineStep(
+        None, "Move To", target_point=(game.player.x, game.player.y)
+    )
+    monkeypatch.setattr(
+        game_module, "load_memory_file", lambda *args, **kwargs: [macro_command]
+    )
+    game.day_plan = [
+        DayPlanActivity("macro", "Routine: Chores", macro_name="Chores"),
+        DayPlanActivity("power_nap", "Power Nap"),
+        DayPlanActivity("sleep", "Sleep", scheduled_minutes=23 * 60),
+    ]
+
+    game.start_planned_day()
+
+    bed_id = game.object_of_type("bed").object_id
+    assert game.day.remembered_routine == [
+        macro_command,
+        RoutineStep(bed_id, "Power Nap", "bed"),
+        RoutineStep(bed_id, "Sleep", "bed"),
+    ]
+
+
+def test_sleep_starts_rewind_before_finishing_day(monkeypatch) -> None:
+    game = Game(fullscreen=False)
+    game.day_position_history.append((game.player.x + 10, game.player.y))
+    finish_calls = 0
+
+    def finish_day() -> bool:
+        nonlocal finish_calls
+        finish_calls += 1
+        return True
+
+    monkeypatch.setattr(game, "finish_day", finish_day)
+
+    game.begin_day_transition()
+
+    assert game.day_transition_phase == "night_bumper"
+    assert finish_calls == 0
+    game.update_day_transition(game_module.NIGHT_BUMPER_DURATION_SECONDS)
+    game.update_day_rewind(game_module.FIXED_SIMULATION_TICK_SECONDS)
+    assert game.player.x < game.day_position_history[-1][0]
+
+
+def test_routine_completion_check_flags_unavailable_moves() -> None:
+    game = Game(fullscreen=False)
+    reachable = RoutineStep(
+        None,
+        "Move To",
+        target_point=(game.player.x, game.player.y),
+    )
+    missing_target = RoutineStep(999_999, "Gather", target_type="pebble")
+    missing_ingredient = RoutineStep(None, "Eat Berries", target_type="berries")
+
+    assert game.routine_step_status(reachable) == "available"
+    assert game.routine_step_status(missing_target) == "invalid"
+    assert game.routine_step_status(missing_ingredient) == "blocked"
+    assert game.routine_step_can_complete(reachable) is True
+    assert game.routine_step_can_complete(missing_target) is False
+    assert game.routine_can_complete([reachable]) is True
+    assert game.routine_can_complete([reachable, missing_target]) is False
+    assert game.routine_status([reachable, missing_ingredient]) == "blocked"
 
 
 def test_rewind_vcr_effect_draws_without_changing_rewind_state() -> None:

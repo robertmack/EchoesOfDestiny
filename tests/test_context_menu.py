@@ -17,6 +17,7 @@ from remembering.game import (
     build_ground_context_menu_options,
     build_path_points,
     compact_label,
+    missing_recipe_ingredients,
     object_map_label,
     object_action_menu_options,
     object_job_duration_seconds,
@@ -27,6 +28,7 @@ from remembering.game import (
     tile_aligned_area_bounds,
 )
 from remembering.model import (
+    DayState,
     LevelTileState,
     Mode,
     ObjectKind,
@@ -42,13 +44,32 @@ from remembering.world import (
     DEFAULT_CURRENT_LEVEL_PATH,
     create_world,
     load_memory_file,
+    load_map,
     load_object_types,
     save_persistent_objects,
 )
 
 
+def memory_test_game() -> Game:
+    game = Game.__new__(Game)
+    game.map = load_map(persistence_path=None)
+    game.objects = game.map.objects
+    game.player = PlayerState()
+    game.player_radius = 28
+    game.interaction_distance = 90
+    game.stagger_phase = 0.0
+    game.day = DayState(mode=Mode.DIRECT)
+    game.thought_bubble_text = None
+    game.thought_bubble_source = None
+    game.thought_bubble_timer = 0.0
+    game.object_memory_check_accumulator = 0.0
+    game.messages = []
+    game.message_scroll_offset = 0
+    return game
+
+
 def test_crossing_an_unlocked_closed_door_stops_once_and_opens_it() -> None:
-    game = Game(fullscreen=False)
+    game = memory_test_game()
     door = next(
         boundary
         for boundary in game.map.boundaries
@@ -68,6 +89,63 @@ def test_crossing_an_unlocked_closed_door_stops_once_and_opens_it() -> None:
 
     assert game.move_along_path(1.0)
     assert (game.player.x, game.player.y) != start
+
+
+def test_object_memory_is_once_daily_and_halves_after_each_spoken_recall(monkeypatch) -> None:
+    game = memory_test_game()
+    bowl = next(obj for obj in game.objects.values() if obj.object_id == 2711)
+    game.player.x, game.player.y = bowl.center
+    rolls = iter((0.49, 0.49, 0.49, 0.8))
+    monkeypatch.setattr("remembering.game.random.random", lambda: next(rolls))
+
+    game.update_object_memories(0.5)
+    assert game.thought_bubble_text == "Warm porridge. Someone was looking after me."
+    state = bowl.state["object_memory_state"]["porridge_comfort"]
+    assert state == {"last_roll_day": 1, "times_said": 1}
+
+    game.thought_bubble_text = None
+    game.update_object_memories(0.5)
+    assert game.thought_bubble_text is None
+
+    game.day.attempts = 2
+    game.update_object_memories(0.5)
+    assert game.thought_bubble_text == "Warm porridge. Someone was looking after me."
+    assert state["times_said"] == 2
+
+    game.thought_bubble_text = None
+    game.day.attempts = 3
+    game.update_object_memories(0.5)
+    assert game.thought_bubble_text is None
+    assert state["last_roll_day"] == 3
+    assert state["times_said"] == 2
+
+
+def test_persistent_objects_do_not_passively_decay() -> None:
+    game = memory_test_game()
+    bowl = game.objects[2711]
+    table = game.objects[2]
+
+    game.advance_simple_object_persistence()
+
+    assert bowl.active is True
+    assert bowl.persistent is True
+    assert "missing_table_food" not in table.state.get("memory_refs", [])
+
+
+def test_tabletop_porridge_can_be_reached_and_eaten_directly() -> None:
+    game = memory_test_game()
+    bowl = game.objects[2711]
+    game.player.x, game.player.y = game.map.tile_map.tile_center(68, 64)
+
+    assert "Eat Porridge" in object_action_menu_options(bowl, game.player)
+    assert game.build_navigation_path_to_object(bowl)
+
+    consumed: list[tuple[int, str]] = []
+    game.consume_carried_food = lambda food, location: consumed.append(
+        (food.object_id, location)
+    )
+    game.complete_job(PendingJob(bowl.object_id, "Eat Porridge"))
+    assert consumed == [(bowl.object_id, "from the table")]
 
 
 def current_level_copy(tmp_path):
@@ -112,6 +190,16 @@ def test_workbench_shows_disabled_recipes_and_sidebar_buttons_are_clickable() ->
         "Craft Wooden Bucket (requirements not met)",
         "Weave Fiber Basket (requirements not met)",
     ]
+    assert missing_recipe_ingredients(workbench, game.player, options[0]) == [
+        ("branch", 1),
+        ("pebble", 1),
+        ("fiber", 1),
+    ]
+    game.player.inventory["branch"] = 1
+    assert missing_recipe_ingredients(workbench, game.player, options[0]) == [
+        ("pebble", 1),
+        ("fiber", 1),
+    ]
 
     game.selected_id = workbench.object_id
     game.activate_sidebar_action(0)
@@ -144,6 +232,8 @@ def test_shallow_water_context_menu_gathers_with_empty_bucket() -> None:
     assert build_ground_context_menu_options(tile, game.player) == [
         "Move To",
         "Drop Bucket",
+        "Drink Water",
+        "Drink Until Full",
         "Gather Water",
     ]
 
@@ -160,11 +250,13 @@ def test_shallow_water_context_menu_gathers_with_empty_bucket() -> None:
     assert disabled_options == [
         "Move To",
         "Drop Bucket",
+        "Drink Water",
+        "Drink Until Full",
         "Gather Water (empty bucket required)",
     ]
     game.context_ground_target = water_target.point
     game.context_menu_options = disabled_options
-    game.activate_context_option(2)
+    game.activate_context_option(4)
     assert game.context_menu_options == disabled_options
     assert game.pending_area_target is None
 
@@ -177,8 +269,39 @@ def test_shallow_water_context_menu_gathers_with_empty_bucket() -> None:
     assert build_ground_context_menu_options(pond, game.player) == [
         "Move To",
         "Drop Bucket",
+        "Drink Water",
+        "Drink Until Full",
         "Gather Water",
     ]
+
+
+def test_object_on_water_keeps_object_and_underlying_tile_context_options() -> None:
+    game = Game(fullscreen=False)
+    game.day.mode = Mode.DIRECT
+    give_bucket(game)
+    water_target = game.water_sources_in_bounds(
+        (0, 0, game.map.width, game.map.height)
+    )[0]
+    grass = game.object_of_type("grass")
+    grass.x = round(water_target[0] - grass.width / 2)
+    grass.y = round(water_target[1] - grass.height / 2)
+    game.camera.center_on(water_target, (game.map.width, game.map.height))
+
+    game.handle_context_click(game.camera.world_to_screen(water_target))
+
+    assert "Gather" in game.context_menu_options
+    assert "Drink Water" in game.context_menu_options
+    assert "Drink Until Full" in game.context_menu_options
+    assert "Gather Water" in game.context_menu_options
+    gather_index = game.context_menu_options.index("Gather")
+    water_index = game.context_menu_options.index("Gather Water")
+    assert game.context_option_target_ids[gather_index] == grass.object_id
+    assert game.context_option_target_ids[water_index] is None
+
+    game.player.x, game.player.y = water_target
+    game.activate_context_option(water_index)
+    assert game.pending_area_target is not None
+    assert game.pending_area_target.action == "Gather Water"
 
 
 def test_drinking_from_terrain_is_recorded_and_replayed() -> None:
@@ -206,6 +329,26 @@ def test_drinking_from_terrain_is_recorded_and_replayed() -> None:
 
     assert game.day.replay_index == 1
     assert game.player.conditions["thirst"] < 50
+
+
+def test_drink_until_full_repeats_until_thirst_is_zero() -> None:
+    game = Game(fullscreen=False)
+    target = game.water_sources_in_bounds(
+        (0, 0, game.map.width, game.map.height)
+    )[0]
+    game.player.x, game.player.y = target
+    game.player.conditions["thirst"] = 80
+    give_bucket(game)
+
+    assert game.queue_terrain_drink(target, record=True, until_full=True) is True
+    assert game.day.today_routine[-1] == RoutineStep(
+        None, "Drink Until Full", target_point=target
+    )
+    for _ in range(4):
+        game.update(0.0)
+
+    assert game.player.conditions["thirst"] == 0
+    assert game.pending_area_target is None
 
 
 def test_ruined_bucket_cannot_start_or_repeat_water_gathering() -> None:
@@ -873,12 +1016,21 @@ def test_persistent_objects_reset_and_inventory_clears_at_end_of_day(tmp_path) -
     assert game.object_of_type("branch").active is True
     assert game.object_of_type("bed").state == {}
     assert not game.player.inventory
-    assert game.day.number == 2
+    assert game.day.number == 1
+    assert game.day.attempts == 2
 
 
-def test_stored_tool_can_become_persistent_and_unstored_progress_decays(tmp_path) -> None:
+def test_stored_tool_can_become_persistent_and_unstored_progress_is_retained(
+    tmp_path, monkeypatch
+) -> None:
     game = Game(fullscreen=False, persistence_path=current_level_copy(tmp_path))
     storage = game.object_of_type("tool_storage")
+    axe_memory = game.storage_memories[storage.object_id]["axe"]
+    axe_memory["store_count"] = 3
+    axe_memory["present"] = False
+    game.advance_storage_memories()
+    assert axe_memory["store_count"] == 3
+
     game.player.has_hoe = True
     game.player.carrying_hoe = True
     game.player.hoe_quality = 20
@@ -887,21 +1039,13 @@ def test_stored_tool_can_become_persistent_and_unstored_progress_decays(tmp_path
     assert hoe_memory["store_count"] == 0
     assert hoe_memory["present"] is True
 
-    game.map.permanent_soil_chance_per_till = 1.0
-    game.map.till_count_loss_chance = 0.0
+    monkeypatch.setattr(game, "policy_chance", lambda *args: 1.0)
     game.finish_day()
     hoe_memory = game.storage_memories[storage.object_id]["hoe"]
     assert hoe_memory["store_count"] == 1
     assert hoe_memory["persistent"] is True
     assert game.player.has_hoe is True
     assert game.player.carrying_hoe is False
-
-    axe_memory = game.storage_memories[storage.object_id]["axe"]
-    axe_memory["store_count"] = 3
-    axe_memory["present"] = False
-    game.map.till_count_loss_chance = 1.0
-    game.advance_storage_memories()
-    assert axe_memory["store_count"] == 2
 
     game.complete_job(PendingJob(game.object_of_type("tool_storage").object_id, "Take Hoe"))
     assert game.storage_memories[storage.object_id]["hoe"]["present"] is False
@@ -971,7 +1115,8 @@ def test_sleep_fades_out_resets_persistent_level_and_fades_in(tmp_path) -> None:
 
     game.update(DAY_FADE_DURATION_SECONDS / 2)
     assert game.day_transition_phase == "fade_in"
-    assert game.day.number == 2
+    assert game.day.number == 1
+    assert game.day.attempts == 2
     assert game.object_of_type("branch").active is True
     assert not game.player.inventory
     restored_tile = game.map.tile_map.tile_at(column, row)
@@ -1010,10 +1155,11 @@ def test_queued_sleep_completes_night_reset_while_auto_pause_is_enabled(tmp_path
     assert game.simulation_paused is False
     for _ in range(2_000):
         game.update(0.05)
-        if game.day.number == 2 and game.day_transition_phase is None:
+        if game.day.attempts == 2 and game.day_transition_phase is None:
             break
 
-    assert game.day.number == 2
+    assert game.day.number == 1
+    assert game.day.attempts == 2
     assert game.day.current_time_minutes == 360
     assert game.map.tile_map.tile_at(column, row).kind is TileKind.GRASSLAND
     assert game.simulation_paused is True
@@ -1035,7 +1181,8 @@ def test_auto_cheat_memory_forces_dawn_if_bed_cannot_be_reached(
 
     assert game.day_transition_phase == "fade_out"
     game.update(DAY_FADE_DURATION_SECONDS)
-    assert game.day.number == 2
+    assert game.day.number == 1
+    assert game.day.attempts == 2
     assert game.day.current_time_minutes == 360
     assert game.day_transition_phase == "fade_in"
 
@@ -1198,6 +1345,26 @@ def test_adjust_memory_can_reorder_remove_and_replace_area_orders() -> None:
     assert game.day.remembered_routine[0].action == "Gather Seeds"
     game.handle_memory_editor_key(pygame.K_DELETE, 0)
     assert [step.action for step in game.day.remembered_routine] == ["Gather Pebbles"]
+
+
+def test_command_editor_map_ignores_right_context_clicks() -> None:
+    game = Game(fullscreen=False)
+    table = game.objects[2]
+    game.camera.center_on(table.center, (game.map.width, game.map.height))
+    game.open_memory_editor()
+    pygame.event.post(
+        pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            button=3,
+            pos=game.camera.world_to_screen(table.center),
+        )
+    )
+
+    game.handle_events()
+
+    assert game.adjusting_memory is True
+    assert game.context_menu_options == []
+    assert game.selected_id is None
 
 
 def test_activate_sidebar_action_queues_selected_action() -> None:
@@ -1612,7 +1779,7 @@ def test_area_command_quantity_selector_limits_nearest_targets(monkeypatch) -> N
     assert remembered.quantity == 2
 
 
-def test_clicking_character_chooses_nearest_targets_for_farm_area_command(
+def test_explicit_nearest_mode_chooses_nearest_targets_for_farm_command(
     monkeypatch,
 ) -> None:
     game = Game(fullscreen=False)
@@ -1622,12 +1789,8 @@ def test_clicking_character_chooses_nearest_targets_for_farm_area_command(
         for distance in (30, 10, 20)
     ]
     monkeypatch.setattr(game, "build_area_targets", lambda command, bounds: targets)
-    game.active_command = "Tend Crops"
-    game.command_drag_start = (game.player.x, game.player.y)
-
-    game.finish_command_drag(
-        game.camera.world_to_screen((game.player.x, game.player.y))
-    )
+    game.target_selection_mode = "nearest"
+    game.select_area_command("Tend Crops")
 
     assert [target.point for target in game.area_targets] == [
         (game.player.x + 10, game.player.y),
@@ -1638,6 +1801,46 @@ def test_clicking_character_chooses_nearest_targets_for_farm_area_command(
     assert remembered.quantity == 2
     assert remembered.nearest_to_player is True
     assert remembered.area_bounds is None
+
+
+def test_target_and_area_modes_produce_distinct_map_selections(monkeypatch) -> None:
+    game = Game(fullscreen=False)
+    captured: list[tuple[int, int, int, int]] = []
+    monkeypatch.setattr(
+        game,
+        "queue_area_command",
+        lambda _command, bounds, _quantity, **_kwargs: captured.append(bounds),
+    )
+    size = game.map.tile_map.tile_size
+    start = (10 * size + 2, 12 * size + 3)
+    end = (13 * size + 4, 15 * size + 5)
+
+    game.target_selection_mode = "target"
+    game.active_command = "Gather Pebbles"
+    game.command_drag_start = start
+    game.camera.center_on(end, (game.map.width, game.map.height))
+    game.finish_command_drag(game.camera.world_to_screen(end))
+    assert captured[-1] == (13 * size, 15 * size, 14 * size, 16 * size)
+
+    game.target_selection_mode = "area"
+    game.active_command = "Gather Pebbles"
+    game.command_drag_start = start
+    game.camera.center_on(end, (game.map.width, game.map.height))
+    game.finish_command_drag(game.camera.world_to_screen(end))
+    assert captured[-1] == (10 * size, 12 * size, 14 * size, 16 * size)
+
+
+def test_command_menu_exposes_three_explicit_target_modes() -> None:
+    game = Game(fullscreen=False)
+    game.active_command_category = "Gather"
+
+    game.draw_ui()
+
+    assert [mode for _rect, mode in game.target_selection_buttons] == [
+        "nearest",
+        "target",
+        "area",
+    ]
 
 
 def test_replay_reissues_an_area_command_against_the_current_world() -> None:
@@ -1886,14 +2089,16 @@ def test_chopping_tree_yields_wood_and_replaces_it_with_a_stump() -> None:
     assert "blocked" in tile.properties
 
 
-def test_chopped_tree_state_can_become_persistent_and_memory_can_decay() -> None:
+def test_chopped_tree_state_can_become_persistent_and_memory_is_retained(
+    monkeypatch,
+) -> None:
     game = Game(fullscreen=False)
     tree = game.object_of_type("tree")
     give_axe(game)
     game.complete_job(PendingJob(tree.object_id, "Chop Down Tree"))
-    game.map.permanent_soil_chance_per_till = 1.0
 
     initial_count = int(tree_state_data(tree.state)["stump_memory_count"])
+    monkeypatch.setattr(game, "policy_chance", lambda *args: 1.0)
     game.advance_stump_memories()
 
     assert tree.persistent is True
@@ -1908,6 +2113,5 @@ def test_chopped_tree_state_can_become_persistent_and_memory_can_decay() -> None
         {"form": "tree", "branch_taken": False, "stump_memory_count": 2}
     )
     tree.form = "standing"
-    game.map.till_count_loss_chance = 1.0
     game.advance_stump_memories()
-    assert tree_state_data(tree.state)["stump_memory_count"] == 1
+    assert tree_state_data(tree.state)["stump_memory_count"] == 2

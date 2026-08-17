@@ -23,10 +23,6 @@
         }
       ],
       "spawn_chances": {
-        "pebble": 0.05,
-        "wild_plant": 0.04,
-        "branch": 0.05,
-        "bush": 0.02,
         "grass": 0.10
       },
       "tilling": {
@@ -51,6 +47,9 @@
       }
     },
     "shallow_water": {
+      "illness_exposures": {
+        "contaminated_water": 0.0
+      },
       "spawn_chances": {},
       "spawn_influence": [
         {
@@ -65,21 +64,14 @@
       "spawn_chances": {}
     },
     "hills": {
-      "spawn_chances": {
-        "pebble": 0.12,
-        "wild_plant": 0.02,
-        "branch": 0.0
-      }
+      "spawn_chances": {}
     },
     "pond": {
+      "illness_exposures": {
+        "contaminated_water": 0.20
+      },
       "spawn_chances": {},
       "spawn_influence": [
-        {
-          "type": "bush",
-          "chance": 0.10,
-          "distance": 2,
-          "decay": 0.5
-        },
         {
           "type": "grass",
           "chance": 0.05,

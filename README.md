@@ -236,17 +236,27 @@ Pressing F5 first reads `homestead.jsonc`. Every authored object ID is added to 
 
 Quality is mutable instance data from 1 to 100: 1–20 is ruined, 21–40 damaged, 41–60 worn, 61–79 good, and 80–100 fine. Every object type provides one description for each quality stage, and Object View automatically displays the description matching the selected instance. The `instance_fields` section at the top of `data/object_types.jsonc` documents every supported instance field.
 
-`data/tile_types.jsonc` controls random morning population by tile type. Grassland currently has a 5% pebble chance, 4% wild-plant chance (currently the wheat variant), 10% tall-grass chance, and 2% berry-bush chance per available tile. Hills increase pebble chance to 12%. Tile and object types can add local `spawn_influence` entries containing `type`, `chance`, `distance`, and `decay`. The first affected tile receives the full boost; each farther tile multiplies it by `decay`, so `1.0` remains constant while `0.5` halves the boost per tile. A day-based seed creates a different layout each morning while an F5 reload during the same day recreates the same layout. Daily-spawned items are omitted from the nightly state file because the next morning replaces them.
+Object memories are reusable entries in the catalog-level `memories` array. An
+object type may reference several IDs with its own `memories` array. When the
+character comes within a memory's `radius_tiles`, that memory is rolled at most once
+per day. Each successful spoken recall halves its future chance. Gameplay may attach
+additional references to a particular object with `Game.add_object_memory`; these
+references and their recall history are stored in the object's state and persist in
+the current-level save.
+
+`data/tile_types.jsonc` controls random morning population by tile type. Only tall grass is currently regenerated, with a 10% chance per available grassland tile. Berry bushes, branches, pebbles, and wild wheat are fixed objects authored in `data/homestead.jsonc`, so their locations and state persist instead of changing each morning. Object forms default to `"can_spawn_on_water": false`; a form must explicitly set it to `true` before daily generation can place it on shallow water, ponds, or deep water. Tile and object types can add local `spawn_influence` entries containing `type`, `chance`, `distance`, and `decay`. A day-based seed creates a different tall-grass layout each morning while an F5 reload during the same day recreates the same layout. Daily-spawned items are omitted from the nightly state file because the next morning replaces them.
 
 Harvest Berries is also available as a nearest-first, quantity-limited Gather area
 command. Harvesting takes 3 seconds without a basket and 0.5 seconds with one, then
 clears the bush's `has_berries` state without removing the bush.
 
-For Gather and Farm area commands, clicking the character instead of dragging a
-rectangle chooses the nearest eligible targets across the map, up to the current
-quantity. Remembered routines retain this as a nearest-to-character instruction and
-rescan from the character's current position on replay. Construction placement and
-water-source authorization still require explicit map selections.
+Action targeting has three explicit modes. **Nearest** chooses eligible targets by
+distance from the character, up to the current quantity. **Target** puts the map in
+single-tile selection mode and displays its `(x, y)` coordinate. **Area** puts the map
+in drag-selection mode and displays the selected tile rectangle. Remembered routines
+retain nearest-to-character instructions or the selected target/area and rescan the
+current world during replay. Water-source authorization still uses an explicit map
+selection.
 
 Harvesting berries or mature wheat awards one Harvesting XP. Every 10 cumulative XP
 grants a Harvesting level, and each level increases harvesting work speed by 5%.

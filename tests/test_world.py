@@ -1,5 +1,6 @@
 import math
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -17,6 +18,7 @@ from remembering.world import (
     initialize_current_level_from_map,
     load_memory_file,
     load_map,
+    load_object_types,
     memory_file_path,
     save_memory_file,
     save_persistent_objects,
@@ -26,6 +28,7 @@ from remembering.world import (
     _spread_spawn_influence,
     _apply_boundaries,
     _boundary_from_entry,
+    _generate_daily_objects,
 )
 from remembering.sprites import overlay_alpha
 from remembering.model import SpriteOverlay
@@ -423,8 +426,9 @@ def test_map_instances_reference_master_object_catalog() -> None:
             "quality",
             "width",
             "height",
-            "active",
-            "state",
+                "active",
+                "persistent",
+                "state",
         }
         for instance in map_data["objects"]
     )
@@ -511,7 +515,7 @@ def test_persistent_objects_round_trip_separately_from_map(tmp_path) -> None:
     reloaded_pebble = next(obj for obj in reloaded.objects.values() if obj.type_id == "pebble")
     reloaded_bed = next(obj for obj in reloaded.objects.values() if obj.type_id == "bed")
     assert reloaded_branch.active is True
-    assert reloaded_pebble.quality == 91
+    assert reloaded_pebble.quality == 100
     assert reloaded_bed.state == {}
     assert reloaded_bed.description == original_bed.description
     assert next(entry for entry in saved_data["objects"] if entry["id"] == original_bed.object_id)["type"] == "bed"
@@ -626,26 +630,41 @@ def test_nonpersistent_instance_keeps_live_state_across_days(tmp_path) -> None:
     assert reloaded.objects[tree.object_id].quality == 12
 
 
-def test_grassland_daily_spawn_chances_are_authored_in_tile_catalog() -> None:
+def test_only_tall_grass_is_randomly_spawned_each_day() -> None:
     data = loads_jsonc(DEFAULT_TILE_TYPES_PATH.read_text(encoding="utf-8"))
     chances = data["tile_types"]["grassland"]["spawn_chances"]
 
-    assert chances == {
-        "pebble": 0.05,
-        "wild_plant": 0.04,
-        "branch": 0.05,
-        "bush": 0.02,
-        "grass": 0.10,
-    }
-    assert data["tile_types"]["hills"]["spawn_chances"]["pebble"] == 0.12
-    assert {influence["type"] for influence in data["tile_types"]["pond"]["spawn_influence"]} == {
-        "bush",
-        "grass",
-    }
+    assert chances == {"grass": 0.10}
+    assert data["tile_types"]["hills"]["spawn_chances"] == {}
+    assert {influence["type"] for influence in data["tile_types"]["pond"]["spawn_influence"]} == {"grass"}
     for water_kind in ("pond", "shallow_water", "deep_water"):
         assert {influence["type"] for influence in data["tile_types"][water_kind]["spawn_influence"]} >= {
             "grass"
         }
+
+
+def test_daily_objects_require_explicit_permission_to_spawn_on_water() -> None:
+    object_types = load_object_types(DEFAULT_OBJECT_TYPES_PATH)
+    grass = object_types["grass"]
+    form = grass.form_definition()
+    assert form.can_spawn_on_water is False
+
+    water_map = TileMap(1, 1, 64, [Tile(TileKind.DEEP_WATER)])
+    spawn_chances = {TileKind.DEEP_WATER: {"grass": 1.0}}
+    assert _generate_daily_objects(
+        water_map, [], object_types, spawn_chances, {}, 1, 1
+    ) == []
+
+    opted_in_form = replace(form, can_spawn_on_water=True)
+    opted_in_grass = replace(
+        grass, forms={**grass.forms, grass.default_form: opted_in_form}
+    )
+    opted_in_types = {**object_types, "grass": opted_in_grass}
+    spawned = _generate_daily_objects(
+        water_map, [], opted_in_types, spawn_chances, {}, 1, 1
+    )
+    assert len(spawned) == 1
+    assert spawned[0].type_id == "grass"
 
 
 def test_tall_grass_fits_inside_one_tile() -> None:
@@ -743,7 +762,7 @@ def test_tilled_tiles_receive_distinct_stable_persistence_affinities() -> None:
     } == first_values
 
 
-def test_daily_population_changes_by_day_and_branches_spawn_near_trees() -> None:
+def test_daily_population_changes_by_day_and_only_contains_tall_grass() -> None:
     first_day = load_map(persistence_path=None, day_number=1)
     second_day = load_map(persistence_path=None, day_number=2)
     first_spawns = [obj for obj in first_day.objects.values() if obj.daily_spawned]
@@ -752,35 +771,20 @@ def test_daily_population_changes_by_day_and_branches_spawn_near_trees() -> None
     second_layout = {(obj.type_id, obj.x, obj.y) for obj in second_spawns}
 
     assert first_layout != second_layout
-    assert {"pebble", "wild_plant", "branch", "bush"} <= {
-        obj.type_id for obj in first_spawns
-    }
-    wheat = next(obj for obj in first_spawns if obj.type_id == "wild_plant")
+    assert {obj.type_id for obj in first_spawns + second_spawns} == {"grass"}
+    fixed_resources = [
+        obj
+        for obj in first_day.objects.values()
+        if obj.type_id in {"bush", "branch", "pebble", "wild_plant"}
+    ]
+    assert fixed_resources
+    assert all(not obj.daily_spawned and obj.persistent for obj in fixed_resources)
+    wheat = next(obj for obj in fixed_resources if obj.type_id == "wild_plant")
     assert wheat.variant == "wheat"
     assert wheat.name == "Wild Wheat"
-    trees = [obj for obj in first_day.objects.values() if obj.type_id == "tree"]
-    branches = [obj for obj in first_spawns if obj.type_id == "branch"]
-    assert first_day.object_types[
-        "tree"
-    ].form_definition("standing").spawn_influence == (("branch", 0.35, 5, 0.75),)
-    assert len(branches) >= 100
-    assert any(
-        min(math.dist(branch.center, tree.center) for tree in trees)
-        < 100 / 32 * first_day.tile_map.tile_size
-        for branch in branches
-    )
-    ground_spawns = [
-        obj
-        for obj in first_spawns
-        if obj.type_id in {"pebble", "wild_plant"}
-    ]
-    assert all(
-        first_day.tile_map.tile_at_world(*obj.center)[2].kind in {TileKind.GRASSLAND, TileKind.HILLS}
-        for obj in ground_spawns
-    )
 
 
-def test_ponds_are_traversable_and_boost_nearby_berry_bushes() -> None:
+def test_ponds_are_traversable_and_have_fixed_nearby_berry_bushes() -> None:
     map_definition = load_map(day_number=1)
     ponds = [feature for feature in map_definition.terrain if feature.kind == "pond"]
     berry_bushes = [
@@ -793,6 +797,7 @@ def test_ponds_are_traversable_and_boost_nearby_berry_bushes() -> None:
     assert map_definition.tile_map.tile_at(39, 40).kind is TileKind.POND
     assert TileKind.POND in TRAVERSABLE_TILE_KINDS
     assert berry_bushes
+    assert all(not bush.daily_spawned and bush.persistent for bush in berry_bushes)
     assert all(
         map_definition.tile_map.tile_at_world(*bush.center)[2].kind is TileKind.GRASSLAND
         for bush in berry_bushes
@@ -813,16 +818,16 @@ def test_ponds_are_traversable_and_boost_nearby_berry_bushes() -> None:
     )
 
 
-def test_boulders_are_persistent_and_increase_nearby_pebble_chance() -> None:
+def test_boulders_and_authored_pebbles_are_persistent() -> None:
     map_definition = load_map(day_number=1)
     boulders = [obj for obj in map_definition.objects.values() if obj.type_id == "boulder"]
     pebbles = [obj for obj in map_definition.objects.values() if obj.type_id == "pebble"]
 
     assert len(boulders) == 4
     assert all(boulder.persistent for boulder in boulders)
-    assert map_definition.object_types[
-        "boulder"
-    ].form_definition().spawn_influence == (("pebble", 0.18, 2, 1.0),)
+    assert map_definition.object_types["boulder"].form_definition().spawn_influence == ()
+    assert pebbles
+    assert all(not pebble.daily_spawned and pebble.persistent for pebble in pebbles)
     assert any(
         min(math.dist(pebble.center, boulder.center) for boulder in boulders)
         < 100 / 32 * map_definition.tile_map.tile_size

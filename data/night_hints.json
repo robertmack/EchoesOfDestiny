@@ -1,0 +1,33 @@
+{
+  "cutoff_minutes": 1633,
+  "hints": [
+    {
+      "minute": 1500,
+      "text": "The night has grown very still."
+    },
+    {
+      "minute": 1560,
+      "text": "You remember old warnings about the witching hour."
+    },
+    {
+      "minute": 1590,
+      "text": "The darkness beyond the homestead feels unusually close."
+    },
+    {
+      "minute": 1620,
+      "text": "Time seems reluctant to move forward."
+    },
+    {
+      "minute": 1630,
+      "text": "Something is waiting for the hour to turn."
+    },
+    {
+      "minute": 1632,
+      "text": "You should be asleep."
+    },
+    {
+      "minute": 1633,
+      "text": "The hour arrives. Your eyes close before you decide to close them."
+    }
+  ]
+}

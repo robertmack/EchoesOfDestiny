@@ -48,3 +48,17 @@ def test_nearest_gather_replay_rescans_from_current_player_location(tmp_path) ->
         for target in game.area_targets
     ]
     assert distances == sorted(distances)
+
+
+def test_nearest_target_mode_queues_without_dragging_an_area(tmp_path) -> None:
+    game = Game(fullscreen=False, persistence_path=tmp_path / "current_level.jsonc")
+    game.target_selection_mode = "nearest"
+    game.area_command_quantity = 2
+
+    game.select_area_command("Gather Pebbles")
+
+    assert game.active_command is None
+    remembered = game.day.today_routine[-1]
+    assert remembered.action == "Gather Pebbles"
+    assert remembered.quantity == 2
+    assert remembered.nearest_to_player is True

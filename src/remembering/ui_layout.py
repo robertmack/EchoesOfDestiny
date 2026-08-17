@@ -26,6 +26,7 @@ SIDEBAR_WIDTH_PX = (WINDOW_WIDTH_PX - MAP_SIZE_PX) // 2
 
 LEFT_DOCK_RECT = pygame.Rect(0, 0, SIDEBAR_WIDTH_PX, WINDOW_HEIGHT_PX)
 LEFT_SELECTION_HEIGHT_PX = 300
+LEFT_ROUTINE_HEIGHT_PX = 92
 LEFT_MESSAGE_HISTORY_HEIGHT_PX = 120
 LEFT_SELECTION_RECT = pygame.Rect(
     LEFT_DOCK_RECT.x,
@@ -39,11 +40,17 @@ LEFT_MESSAGE_HISTORY_RECT = pygame.Rect(
     LEFT_DOCK_RECT.width,
     LEFT_MESSAGE_HISTORY_HEIGHT_PX,
 )
-LEFT_COMMAND_RECT = pygame.Rect(
+LEFT_ROUTINE_RECT = pygame.Rect(
     LEFT_DOCK_RECT.x,
     LEFT_SELECTION_RECT.bottom,
     LEFT_DOCK_RECT.width,
-    LEFT_MESSAGE_HISTORY_RECT.top - LEFT_SELECTION_RECT.bottom,
+    LEFT_ROUTINE_HEIGHT_PX,
+)
+LEFT_COMMAND_RECT = pygame.Rect(
+    LEFT_DOCK_RECT.x,
+    LEFT_ROUTINE_RECT.bottom,
+    LEFT_DOCK_RECT.width,
+    LEFT_MESSAGE_HISTORY_RECT.top - LEFT_ROUTINE_RECT.bottom,
 )
 TIMELINE_RECT = pygame.Rect(
     SIDEBAR_WIDTH_PX, 0, MAP_SIZE_PX, TIMELINE_HEIGHT_PX
@@ -79,7 +86,7 @@ EQUIPMENT_HEIGHT_PX = 260
 class InventoryPage(Enum):
     INVENTORY = "inventory"
     QUESTS = "quests"
-    MACROS = "macros"
+    MACROS = "routines"
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +168,7 @@ def validate_layout() -> None:
     for name, rect in {
         "left dock": LEFT_DOCK_RECT,
         "left selection": LEFT_SELECTION_RECT,
+        "left routines": LEFT_ROUTINE_RECT,
         "left commands": LEFT_COMMAND_RECT,
         "left message history": LEFT_MESSAGE_HISTORY_RECT,
         "timeline": TIMELINE_RECT,

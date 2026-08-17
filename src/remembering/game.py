@@ -19,6 +19,7 @@ from remembering.coordinates import (
     position_from_data,
 )
 from remembering.navigation import find_tile_path, find_tile_path_to_any
+from remembering.illness import ActiveIllness, IllnessType, load_illness_types
 from remembering.model import (
     BuildMemory,
     BoundaryObject,
@@ -68,6 +69,7 @@ from remembering.ui_layout import (
     LEFT_DOCK_RECT,
     LEFT_COMMAND_RECT,
     LEFT_MESSAGE_HISTORY_RECT,
+    LEFT_ROUTINE_RECT,
     LEFT_SELECTION_RECT,
     MAP_RECT,
     MESSAGE_BAR_RECT,
@@ -128,6 +130,25 @@ def action_option_enabled(option: str) -> bool:
     )
 
 
+def missing_recipe_ingredients(
+    obj: WorldObject, player: PlayerState, action: str
+) -> list[tuple[str, int]]:
+    definition = obj.interactions.get(action.removesuffix(DISABLED_INTERACTION_SUFFIX), {})
+    cost = definition.get("cost", {})
+    return [
+        (str(item), int(amount) - player.inventory[str(item)])
+        for item, amount in cost.items()
+        if player.inventory[str(item)] < int(amount)
+    ]
+
+
+def ingredient_requirement_label(item: str, amount: int) -> str:
+    name = item.replace("_", " ")
+    if amount != 1:
+        name += "es" if name.endswith(("s", "x")) else "s"
+    return f"{amount} {name}"
+
+
 def build_ground_context_menu_options(
     tile: Tile,
     player: PlayerState,
@@ -139,6 +160,7 @@ def build_ground_context_menu_options(
         options.append("Drop Bucket")
     if tile.kind in {TileKind.SHALLOW_WATER, TileKind.POND}:
         options.append("Drink Water")
+        options.append("Drink Until Full")
         if player.bucket is not None and int(player.bucket.capacity.get("water", 0)) <= 0:
             options.append(RUINED_BUCKET_REQUIRED)
         else:
@@ -201,7 +223,25 @@ def crop_inspection_lines(obj: WorldObject) -> list[str]:
 
 def routine_step_editable_fields(step: RoutineStep) -> tuple[str, ...]:
     """Return fields meaningful to this command, plus any populated extras."""
+    if step.action == "__end__":
+        return ()
+    if step.action in {"__if__", "__repeat_until__"}:
+        return (
+            "condition_kind",
+            "condition_subject",
+            "condition_operator",
+            "condition_value",
+        )
     fields = ["action"]
+    if step.action == "Harvest and Eat Berries":
+        fields.append("target_mode")
+        if step.nearest_to_player:
+            return tuple(fields)
+        if step.area_bounds is not None or step.target_areas is not None:
+            fields.append("area_bounds")
+        else:
+            fields.append("target_point")
+        return tuple(fields)
     area_commands = {
         *AREA_COMMAND_TYPES,
         "Chop Trees",
@@ -218,7 +258,6 @@ def routine_step_editable_fields(step: RoutineStep) -> tuple[str, ...]:
     elif step.action == "Fill Barrel":
         fields.extend(
             (
-                "target_id",
                 "target_type",
                 "target_point",
                 "area_bounds",
@@ -229,7 +268,7 @@ def routine_step_editable_fields(step: RoutineStep) -> tuple[str, ...]:
     elif step.action == "Move To":
         fields.append("target_point")
     else:
-        fields.extend(("target_id", "target_type", "target_point"))
+        fields.extend(("target_type", "target_point"))
 
     if step.action in AREA_COMMAND_TYPES:
         fields.append("nearest_to_player")
@@ -238,19 +277,20 @@ def routine_step_editable_fields(step: RoutineStep) -> tuple[str, ...]:
     if step.action == "Till Grassland":
         fields.extend(("max_game_minutes", "till_until_done"))
 
-    # Never hide data already carried by a command, even when it came from an
-    # older schema or a hand-edited memory file.
-    for field_name in RoutineStep.__dataclass_fields__:
-        if field_name == "action":
-            continue
-        value = getattr(step, field_name)
-        populated = value is not None and value is not False
-        if populated and field_name not in fields:
-            fields.append(field_name)
+    if step.condition_kind is not None:
+        fields.extend(
+            ("condition_kind", "condition_subject", "condition_operator", "condition_value")
+        )
     return tuple(fields)
 
 
 def routine_field_editor_value(step: RoutineStep, field_name: str) -> object:
+    if field_name == "target_mode":
+        if step.nearest_to_player:
+            return "nearest"
+        if step.area_bounds is not None or step.target_areas is not None:
+            return "area"
+        return "specific"
     value = getattr(step, field_name)
     if value is None:
         return None
@@ -356,14 +396,20 @@ INTERACTION_DISTANCE = 45
 GAME_MINUTES_PER_REAL_SECOND = 1.0
 FIXED_SIMULATION_TICK_SECONDS = 0.05
 DAY_FADE_DURATION_SECONDS = 0.75
+NIGHT_BUMPER_DURATION_SECONDS = 2.75
+NIGHT_BUMPER_TEXT = (
+    "As the light fades behind closed eyes, you relive the sequence of the day."
+)
+DEFAULT_NIGHT_HINTS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "night_hints.json"
+)
 MORNING_OPENING_FADE_SECONDS = 5.0
 INTRO_PAGE_SECONDS = 6.0
+INTRO_FOOTER_HEIGHT = 48
 INTRO_IMAGE_PATHS = tuple(
     Path(__file__).resolve().parents[1] / "assets" / "images" / f"opening_pg{page}.png"
     for page in range(1, 5)
 )
-REWIND_START_SAMPLES_PER_SECOND = 12.0
-REWIND_ACCELERATION_SAMPLES_PER_SECOND_SQUARED = 90.0
 EMPTY_BUCKET_REQUIRED = "Gather Water (empty bucket required)"
 RUINED_BUCKET_REQUIRED = "Gather Water (bucket is ruined)"
 TIME_SPEED_OPTIONS = (
@@ -383,18 +429,19 @@ AREA_COMMAND_TYPES = {
     "Harvest Berries": {"bush"},
 }
 AREA_COMMANDS = list(AREA_COMMAND_TYPES)
+BUILD_COMMAND_TYPES = {
+    "Build Barrel": "barrel",
+    "Build Cupboard": "cupboard",
+}
 NEAREST_AREA_COMMANDS = {
     *AREA_COMMAND_TYPES,
+    *BUILD_COMMAND_TYPES,
     "Chop Trees",
     "Till Grassland",
     "Plant Wheat",
     "Water Crops",
     "Tend Crops",
     "Harvest Wheat",
-}
-BUILD_COMMAND_TYPES = {
-    "Build Barrel": "barrel",
-    "Build Cupboard": "cupboard",
 }
 AREA_COMMAND_CATEGORIES = ("Gather", "Farm", "Build")
 RESOURCE_CHEAT_KEYS = {
@@ -407,7 +454,19 @@ RESOURCE_CHEAT_KEYS = {
 }
 MAX_MESSAGE_HISTORY = 500
 CONDITION_THOUGHT_DISPLAY_SECONDS = 4.0
+VOMITING_DURATION_SECONDS = CONDITION_THOUGHT_DISPLAY_SECONDS
 CONDITION_THOUGHT_GAP_SECONDS = 8.0
+UNAVAILABLE_ROUTINE_COLOR = (235, 82, 82)
+BLOCKED_ROUTINE_COLOR = (224, 190, 72)
+ROUTINE_IF_ACTION = "__if__"
+ROUTINE_LOOP_ACTION = "__repeat_until__"
+ROUTINE_END_ACTION = "__end__"
+ROUTINE_REFERENCE_ACTION = "__routine__"
+ROUTINE_CONTROL_ACTIONS = {
+    ROUTINE_IF_ACTION,
+    ROUTINE_LOOP_ACTION,
+    ROUTINE_END_ACTION,
+}
 CONDITION_COMPLAINTS = {
     "trauma": (
         (90, "I can barely move. Everything hurts."),
@@ -476,6 +535,29 @@ class DayPlanActivity:
     macro_name: str | None = None
     scheduled_minutes: int | None = None
     children: list[DayPlanActivity] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class NightHint:
+    minute: int
+    text: str
+
+
+def load_night_hints(
+    path: Path = DEFAULT_NIGHT_HINTS_PATH,
+) -> tuple[int, tuple[NightHint, ...]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    cutoff = int(payload["cutoff_minutes"])
+    hints = tuple(
+        sorted(
+            (
+                NightHint(int(entry["minute"]), str(entry["text"]))
+                for entry in payload.get("hints", [])
+            ),
+            key=lambda hint: hint.minute,
+        )
+    )
+    return cutoff, hints
 
 
 @dataclass(slots=True)
@@ -547,6 +629,7 @@ class Game:
         self,
         *,
         fullscreen: bool = True,
+        skip_intro: bool = False,
         persistence_path: Path = DEFAULT_CURRENT_LEVEL_PATH,
         memory_directory: Path = DEFAULT_MEMORY_DIR,
     ) -> None:
@@ -572,6 +655,8 @@ class Game:
         self.tile_sprites = TileSpriteCatalog()
         self.boundary_sprites = BoundarySpriteCatalog()
         self.day = DayState(mode=Mode.DIRECT)
+        self.night_cutoff_minutes, self.night_hints = load_night_hints()
+        self.shown_night_hint_minutes: set[int] = set()
         self.persistence_path = persistence_path
         self.memory_directory = memory_directory
         initialize_current_level_from_map(current_level_path=self.persistence_path)
@@ -631,6 +716,8 @@ class Game:
         self.command_category_buttons: list[tuple[pygame.Rect, str]] = []
         self.active_command_category: str | None = None
         self.area_quantity_buttons: list[tuple[pygame.Rect, int]] = []
+        self.target_selection_buttons: list[tuple[pygame.Rect, str]] = []
+        self.target_selection_mode = "area"
         self.area_command_quantity = 10
         self.till_time_buttons: list[tuple[pygame.Rect, str]] = []
         self.till_max_game_minutes = 60
@@ -652,14 +739,20 @@ class Game:
         self.thought_bubble_text: str | None = None
         self.thought_bubble_timer = 0.0
         self.thought_bubble_source: str | None = None
+        self.illness_types = load_illness_types()
+        self.active_illnesses: dict[str, ActiveIllness] = {}
+        self.vomiting_timer_seconds = 0.0
         self.condition_thought_cooldown = 2.0
         self.condition_thought_index = 0
+        self.object_memory_check_accumulator = 0.0
         self.walk_target: tuple[float, float] | None = None
         self.path_target: tuple[float, float] | None = None
         self.navigation_path: list[tuple[float, float]] = []
         self.preview_path: list[tuple[float, float]] = []
+        self.stagger_phase = 0.0
         self.context_menu: list[tuple[pygame.Rect, str]] = []
         self.context_menu_options: list[str] = []
+        self.context_option_target_ids: list[int | None] = []
         self.context_menu_pos: tuple[int, int] | None = None
         self.context_ground_target: tuple[float, float] | None = None
         self.context_inventory_item_id: int | None = None
@@ -688,10 +781,14 @@ class Game:
         ] = []
         self.inventory_food_buttons: list[tuple[pygame.Rect, WorldObject]] = []
         self.macro_buttons: list[tuple[pygame.Rect, str]] = []
+        self.macro_dropdown_open = False
+        self.macro_dropdown_buttons: list[tuple[pygame.Rect, str]] = []
         self.macro_command_buttons: list[tuple[pygame.Rect, str]] = []
+        self.main_macro_dropdown_buttons: list[tuple[pygame.Rect, str]] = []
         self.macro_recording = False
         self.macro_record_start_index = 0
         self.macro_previous_today_routine: list[RoutineStep] | None = None
+        self.routine_moves_expanded = False
         self.equipment_toggle_button = pygame.Rect(0, 0, 0, 0)
         self.single_step_active = False
         self.single_step_command_started = False
@@ -702,17 +799,17 @@ class Game:
             (self.player.x, self.player.y)
         ]
         self.rewind_cursor = 0.0
-        self.rewind_speed = REWIND_START_SAMPLES_PER_SECOND
+        self.rewind_speed = self.time_speed
+        self.rewind_start_time_minutes = self.day.current_time_minutes
+        self.rewind_checkpoints: list[tuple[int, str, dict[str, object]]] = []
+        self.rewind_checkpoint_index = -1
         self.rewind_flashing_objects: set[int] = set()
         self.rewind_flashing_tiles: set[tuple[int, int]] = set()
-        self.rewind_checkpoints: list[
-            tuple[int, str, dict[str, object]]
-        ] = []
-        self.rewind_checkpoint_index = -1
         self.rewind_persistent_objects: dict[int, WorldObject] = {}
-        self.rewind_persistent_tiles: dict[
-            tuple[int, int], tuple[TileKind, tuple[str, ...], LevelTileState | None]
+        self.rewind_persistent_tile_states: dict[
+            tuple[int, int], LevelTileState
         ] = {}
+        self.rewind_persistent_tile_kinds: dict[tuple[int, int], TileKind] = {}
         self.dawn_transition_state: tuple[object, ...] | None = None
         self.dawn_object_signatures = self.object_persistence_signatures()
         self.dawn_tile_signatures = self.tile_persistence_signatures()
@@ -724,17 +821,28 @@ class Game:
         self.memory_editor_rows: list[tuple[pygame.Rect, int]] = []
         self.memory_editor_buttons: list[tuple[pygame.Rect, str]] = []
         self.memory_editor_fields: list[tuple[pygame.Rect, str]] = []
+        self.memory_field_dropdown_open: str | None = None
+        self.memory_field_dropdown_buttons: list[
+            tuple[pygame.Rect, str, object]
+        ] = []
         self.memory_file_name_rect = pygame.Rect(0, 0, 0, 0)
         self.memory_file_name = "homestead"
         self.memory_edit_field: str | None = None
         self.memory_edit_buffer = ""
+        self.routine_rename_source: str | None = None
         self.memory_editor_previous_pause = False
         self.memory_browser_open = False
         self.memory_browser_rows: list[tuple[pygame.Rect, str]] = []
         self.memory_favorite_buttons: list[tuple[pygame.Rect, str]] = []
         self.memory_favorites = self.load_memory_favorites()
         self.running_command_set_name: str | None = None
-        self._editor_camera_restore: tuple[float, float] | None = None
+        self.skip_intro = skip_intro
+        self._editor_camera_restore: tuple[float, float, float] | None = None
+        self.memory_editor_map_camera: tuple[float, float, float] | None = None
+        self.memory_editor_camera_dragging = False
+        self.memory_map_field_selection: str | None = None
+        self.memory_map_drag_start: tuple[float, float] | None = None
+        self.memory_map_drag_current: tuple[float, float] | None = None
         self.day_plan: list[DayPlanActivity] = [
             DayPlanActivity("explore", "Explore"),
             DayPlanActivity("sleep", "Sleep", scheduled_minutes=23 * 60),
@@ -744,7 +852,8 @@ class Game:
         self.selected_conditional_index: int | None = None
 
     def run(self) -> None:
-        self.play_intro()
+        if not self.skip_intro:
+            self.play_intro()
         while self.running:
             dt = self.clock.tick(60) / 1000
             self.handle_events()
@@ -783,14 +892,23 @@ class Game:
                 return
 
             page = pages[page_index]
-            scale = min(WIDTH / page.get_width(), HEIGHT / page.get_height())
+            image_area = pygame.Rect(0, 0, WIDTH, HEIGHT - INTRO_FOOTER_HEIGHT)
+            scale = min(
+                image_area.width / page.get_width(),
+                image_area.height / page.get_height(),
+            )
             size = (
                 max(1, round(page.get_width() * scale)),
                 max(1, round(page.get_height() * scale)),
             )
             shown_page = pygame.transform.smoothscale(page, size)
             self.screen.fill((0, 0, 0))
-            self.screen.blit(shown_page, shown_page.get_rect(center=self.screen.get_rect().center))
+            self.screen.blit(shown_page, shown_page.get_rect(center=image_area.center))
+            instructions = self.small_font.render(
+                "Space to advance     Escape to skip", True, (220, 220, 220)
+            )
+            footer = pygame.Rect(0, image_area.bottom, WIDTH, INTRO_FOOTER_HEIGHT)
+            self.screen.blit(instructions, instructions.get_rect(center=footer.center))
             pygame.display.flip()
 
     def handle_events(self) -> None:
@@ -809,11 +927,41 @@ class Game:
             ):
                 self.day_transition_phase = None
                 self.day_transition_progress = 0.0
+            elif (
+                self.day_transition_phase == "rewind"
+                and event.type == pygame.KEYDOWN
+                and event.key in {
+                    pygame.K_PLUS,
+                    pygame.K_EQUALS,
+                    pygame.K_KP_PLUS,
+                    pygame.K_MINUS,
+                    pygame.K_KP_MINUS,
+                }
+            ):
+                self.adjust_time_speed(
+                    -1
+                    if event.key in {pygame.K_MINUS, pygame.K_KP_MINUS}
+                    else 1
+                )
+            elif (
+                self.day_transition_phase == "rewind"
+                and event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1
+                and (
+                    self.speed_down_button.collidepoint(event.pos)
+                    or self.speed_up_button.collidepoint(event.pos)
+                )
+            ):
+                self.adjust_time_speed(
+                    -1 if self.speed_down_button.collidepoint(event.pos) else 1
+                )
             elif self.day_transition_phase not in {None, "planner"}:
                 continue
             elif event.type == pygame.MOUSEWHEEL:
                 mouse_pos = getattr(event, "pos", pygame.mouse.get_pos())
-                if LEFT_MESSAGE_HISTORY_RECT.collidepoint(mouse_pos):
+                if self.adjusting_memory and COMMAND_EDITOR_MAP_RECT.collidepoint(mouse_pos):
+                    self.zoom_memory_editor_map(event.y, mouse_pos)
+                elif LEFT_MESSAGE_HISTORY_RECT.collidepoint(mouse_pos):
                     self.message_scroll_offset = max(
                         0, self.message_scroll_offset + event.y * 3
                     )
@@ -826,8 +974,16 @@ class Game:
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
                 self.camera_dragging = False
                 self.camera_drag_position = None
+                self.memory_editor_camera_dragging = False
             elif event.type == pygame.KEYUP and event.key in (pygame.K_LCTRL, pygame.K_RCTRL):
                 self.finish_additive_selection()
+            elif (
+                event.type == pygame.MOUSEBUTTONUP
+                and event.button == 1
+                and self.adjusting_memory
+                and self.memory_map_drag_start is not None
+            ):
+                self.finish_memory_map_selection(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.command_drag_start is not None:
                 self.finish_command_drag(event.pos)
             elif event.type == pygame.MOUSEMOTION and self.camera_dragging:
@@ -838,6 +994,22 @@ class Game:
                     )
                     self.camera.pan_by_screen(delta, (self.map.width, self.map.height))
                 self.camera_drag_position = event.pos
+            elif event.type == pygame.MOUSEMOTION and self.memory_editor_camera_dragging:
+                if self.camera_drag_position is not None:
+                    self.pan_memory_editor_map(
+                        (
+                            event.pos[0] - self.camera_drag_position[0],
+                            event.pos[1] - self.camera_drag_position[1],
+                        )
+                    )
+                self.camera_drag_position = event.pos
+            elif (
+                event.type == pygame.MOUSEMOTION
+                and self.adjusting_memory
+                and self.memory_map_drag_start is not None
+                and COMMAND_EDITOR_MAP_RECT.collidepoint(event.pos)
+            ):
+                self.memory_map_drag_current = self.memory_editor_world_at(event.pos)
             elif event.type == pygame.MOUSEMOTION and self.command_drag_start is not None:
                 if MAP_VIEWPORT.collidepoint(event.pos):
                     self.command_drag_current = self.camera.screen_to_world(event.pos)
@@ -898,6 +1070,8 @@ class Game:
                         self.create_carried_object("bucket")
                 elif event.key == pygame.K_e:
                     self.toggle_equipment_panel()
+                elif event.key == pygame.K_r:
+                    self.routine_moves_expanded = not self.routine_moves_expanded
                 elif self.context_menu_options:
                     if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
                         self.context_menu_options = []
@@ -918,8 +1092,17 @@ class Game:
                 elif self.day.mode is Mode.DIRECT and action_index is not None:
                     self.activate_area_menu_index(action_index)
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if self.adjusting_memory and event.button == 1:
-                    self.handle_memory_editor_click(event.pos)
+                if self.adjusting_memory:
+                    if event.button == 1:
+                        self.handle_memory_editor_click(event.pos)
+                    elif event.button == 2 and COMMAND_EDITOR_MAP_RECT.collidepoint(event.pos):
+                        self.memory_editor_camera_dragging = True
+                        self.camera_drag_position = event.pos
+                elif self.day.mode is Mode.MORNING:
+                    if event.button == 1:
+                        # The planner covers the ordinary controls, so hidden
+                        # dock buttons must not consume its clicks.
+                        self.handle_morning_click(event.pos)
                 elif event.button == 3 and self.handle_inventory_food_click(
                     event.pos
                 ):
@@ -949,6 +1132,16 @@ class Game:
                         if rect.collidepoint(event.pos)
                     )
                 elif event.button == 1 and any(
+                    rect.collidepoint(event.pos)
+                    for rect, _name in self.macro_dropdown_buttons
+                ):
+                    name = next(
+                        name
+                        for rect, name in self.macro_dropdown_buttons
+                        if rect.collidepoint(event.pos)
+                    )
+                    self.select_routine_dropdown_entry(name)
+                elif event.button == 1 and any(
                     rect.collidepoint(event.pos) for rect, _action in self.macro_buttons
                 ):
                     action = next(
@@ -956,7 +1149,13 @@ class Game:
                         for rect, action in self.macro_buttons
                         if rect.collidepoint(event.pos)
                     )
-                    if action == "Start":
+                    if action == "Macro Dropdown":
+                        self.macro_dropdown_open = not self.macro_dropdown_open
+                    elif action == "Play":
+                        if self.macro_recording:
+                            self.stop_macro_recording()
+                        self.play_selected_macro()
+                    elif action == "Record":
                         self.start_macro_recording()
                     elif action == "Stop":
                         self.stop_macro_recording()
@@ -966,6 +1165,16 @@ class Game:
                         self.open_memory_editor()
                 elif event.button == 1 and any(
                     rect.collidepoint(event.pos)
+                    for rect, _name in self.main_macro_dropdown_buttons
+                ):
+                    name = next(
+                        name
+                        for rect, name in self.main_macro_dropdown_buttons
+                        if rect.collidepoint(event.pos)
+                    )
+                    self.select_routine_dropdown_entry(name)
+                elif event.button == 1 and any(
+                    rect.collidepoint(event.pos)
                     for rect, _action in self.macro_command_buttons
                 ):
                     action = next(
@@ -973,10 +1182,18 @@ class Game:
                         for rect, action in self.macro_command_buttons
                         if rect.collidepoint(event.pos)
                     )
-                    if action == "Start":
+                    if action == "Macro Dropdown":
+                        self.macro_dropdown_open = not self.macro_dropdown_open
+                    elif action == "Play":
+                        if self.macro_recording:
+                            self.stop_macro_recording()
+                        self.play_selected_macro()
+                    elif action == "Record":
                         self.start_macro_recording()
                     elif action == "Stop":
                         self.stop_macro_recording()
+                    elif action == "Toggle Moves":
+                        self.routine_moves_expanded = not self.routine_moves_expanded
                     else:
                         self.open_memory_editor()
                 elif event.button == 1 and self.context_menu_options:
@@ -993,12 +1210,18 @@ class Game:
                         self.context_inventory_item_id = None
                 elif event.button == 1 and RELOAD_BUTTON.collidepoint(event.pos):
                     self.reload_map()
-                elif self.day.mode is Mode.MORNING:
-                    self.handle_morning_click(event.pos)
                 elif self.day.mode is Mode.DIRECT:
                     if event.button == 1:
                         quantity_change = next(
                             (change for rect, change in self.area_quantity_buttons if rect.collidepoint(event.pos)),
+                            None,
+                        )
+                        target_selection = next(
+                            (
+                                mode
+                                for rect, mode in self.target_selection_buttons
+                                if rect.collidepoint(event.pos)
+                            ),
                             None,
                         )
                         till_time_action = next(
@@ -1042,6 +1265,8 @@ class Game:
                                 self.till_until_done = False
                             else:
                                 self.till_until_done = not self.till_until_done
+                        elif target_selection is not None:
+                            self.set_target_selection_mode(target_selection)
                         elif quantity_change is not None:
                             self.area_command_quantity = max(
                                 1, min(99, self.area_command_quantity + quantity_change)
@@ -1056,14 +1281,7 @@ class Game:
                                 self.active_command_category = None
                                 self.active_command = None
                             else:
-                                self.active_command = command
-                                self.pending_target_areas.clear()
-                                suffix = (
-                                    " Or click the character to choose the nearest amount."
-                                    if command in NEAREST_AREA_COMMANDS
-                                    else ""
-                                )
-                                self.log(f"{command}: drag a rectangle on the map.{suffix}")
+                                self.select_area_command(command)
                         elif self.active_command and MAP_VIEWPORT.collidepoint(event.pos):
                             self.command_drag_start = self.camera.screen_to_world(event.pos)
                             self.command_drag_current = self.command_drag_start
@@ -1081,7 +1299,10 @@ class Game:
     def reload_map(self) -> None:
         try:
             sync_current_level_from_map(current_level_path=self.persistence_path)
-            reloaded_map = load_map(persistence_path=self.persistence_path, day_number=self.day.number)
+            reloaded_map = load_map(
+                persistence_path=self.persistence_path,
+                day_number=self.day.attempts,
+            )
         except (MapLoadError, ObjectPersistenceError) as exc:
             self.log(f"Map reload failed: {exc}")
             return
@@ -1217,6 +1438,12 @@ class Game:
                     )
                 except MapLoadError:
                     unavailable.append(activity.macro_name)
+            elif activity.kind in {"power_nap", "sleep"}:
+                bed = self.object_of_type("bed")
+                action = "Power Nap" if activity.kind == "power_nap" else "Sleep"
+                planned_routine.append(
+                    RoutineStep(bed.object_id, action, bed.type_id)
+                )
             elif activity.kind == "conditional":
                 for child in activity.children:
                     append_activity(child)
@@ -1315,6 +1542,11 @@ class Game:
         self.log("Automatic cheat-memory replay stopped.")
 
     def open_memory_editor(self) -> None:
+        if self.day.mode is Mode.MORNING and self.day_transition_phase == "planner":
+            # The transition overlay is drawn after the editor and would cover
+            # it. Closing the editor naturally returns to the morning planner.
+            self.day_transition_phase = None
+            self.day_transition_progress = 0.0
         self.memory_editor_previous_pause = self.simulation_paused
         self.simulation_paused = True
         self.adjusting_memory = True
@@ -1323,6 +1555,9 @@ class Game:
         self.memory_edit_field = None
         self.memory_edit_buffer = ""
         self.memory_browser_open = False
+        self.memory_editor_map_camera = None
+        self.memory_editor_camera_dragging = False
+        self.memory_map_field_selection = None
         if (
             self.day.mode is Mode.REPLAY
             and self.day.replay_index < len(self.day.remembered_routine)
@@ -1338,6 +1573,8 @@ class Game:
         self.adjusting_memory = False
         self.memory_edit_field = None
         self.memory_edit_buffer = ""
+        self.memory_editor_camera_dragging = False
+        self.memory_map_field_selection = None
         self.menu_index = 0
         self.simulation_paused = self.memory_editor_previous_pause
 
@@ -1363,11 +1600,16 @@ class Game:
         if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE, pygame.K_c):
             self.close_memory_editor()
             return
+        if self.editing_history and key not in {pygame.K_UP, pygame.K_DOWN}:
+            self.log("History is read-only; duplicate it before editing.")
+            return
         if not routine:
             if key == pygame.K_n:
                 self.add_memory_step()
             return
-        if key == pygame.K_UP:
+        if key == pygame.K_TAB:
+            self.indent_memory_step(-1 if modifiers & pygame.KMOD_SHIFT else 1)
+        elif key == pygame.K_UP:
             if modifiers & pygame.KMOD_SHIFT:
                 self.move_memory_step(-1)
             else:
@@ -1387,6 +1629,30 @@ class Game:
             self.replace_memory_step()
 
     def handle_memory_editor_click(self, pos: tuple[int, int]) -> None:
+        if COMMAND_EDITOR_MAP_RECT.collidepoint(pos) and self.day.remembered_routine:
+            if self.editing_history:
+                self.log("History is read-only; duplicate it before editing.")
+                return
+            step = self.day.remembered_routine[self.memory_edit_index]
+            if step.action == "Move To":
+                point = self.memory_editor_world_at(pos)
+                self.day.remembered_routine[self.memory_edit_index] = replace(
+                    step,
+                    target_id=None,
+                    target_type=None,
+                    target_point=point,
+                    area_bounds=None,
+                    target_areas=None,
+                    nearest_to_player=False,
+                )
+                self.memory_map_field_selection = None
+            elif step.action == "Harvest and Eat Berries" and routine_field_editor_value(
+                step, "target_mode"
+            ) in {"area", "specific"}:
+                point = self.memory_editor_world_at(pos)
+                self.memory_map_drag_start = point
+                self.memory_map_drag_current = point
+            return
         if self.memory_browser_open:
             for rect, name in self.memory_favorite_buttons:
                 if rect.collidepoint(pos):
@@ -1398,7 +1664,15 @@ class Game:
                     self.memory_browser_open = False
                     return
             return
+
+        for rect, field_name, value in self.memory_field_dropdown_buttons:
+            if rect.collidepoint(pos):
+                self.select_memory_field_choice(field_name, value)
+                return
         if self.memory_file_name_rect.collidepoint(pos):
+            if self.editing_history:
+                self.log("History cannot be renamed.")
+                return
             self.memory_edit_field = "__memory_file_name__"
             self.memory_edit_buffer = self.memory_file_name
             return
@@ -1406,9 +1680,28 @@ class Game:
             if rect.collidepoint(pos):
                 self.memory_edit_index = index
                 self.memory_edit_field = None
+                self.memory_editor_map_camera = None
                 return
         for rect, field_name in self.memory_editor_fields:
             if rect.collidepoint(pos) and self.day.remembered_routine:
+                if self.editing_history:
+                    self.log("History is read-only; duplicate it before editing.")
+                    return
+                step = self.day.remembered_routine[self.memory_edit_index]
+                if field_name == "target_point" and step.action == "Move To":
+                    self.memory_map_field_selection = "target_point"
+                    self.memory_edit_field = None
+                    self.memory_edit_buffer = ""
+                    return
+                if self.memory_field_choices(field_name) is not None:
+                    self.memory_field_dropdown_open = (
+                        None
+                        if self.memory_field_dropdown_open == field_name
+                        else field_name
+                    )
+                    self.memory_edit_field = None
+                    self.memory_edit_buffer = ""
+                    return
                 self.memory_edit_field = field_name
                 value = getattr(
                     self.day.remembered_routine[self.memory_edit_index], field_name
@@ -1423,8 +1716,22 @@ class Game:
         for rect, action in self.memory_editor_buttons:
             if not rect.collidepoint(pos):
                 continue
+            if self.editing_history and action in {
+                "Save",
+                "Run Now",
+                "Record Routine",
+                "Rename Routine",
+                "Move Up",
+                "Move Down",
+                "Remove",
+                "Add Command",
+                "Add Conditional",
+                "Add Loop",
+            }:
+                self.log("History is read-only; duplicate it before editing.")
+                return
             if (
-                action in {"Save", "Run Now", "Record Macro"}
+                action in {"Save", "Run Now", "Record Routine"}
                 and self.memory_edit_field == "__memory_file_name__"
             ):
                 self.commit_memory_field()
@@ -1442,7 +1749,13 @@ class Game:
                 self.duplicate_memory_step()
             elif action == "New":
                 self.add_memory_step()
-            elif action == "New Set":
+            elif action == "Add Conditional":
+                self.toggle_memory_step_condition()
+            elif action == "Add Loop":
+                self.add_memory_loop()
+            elif action == "Add Command":
+                self.add_memory_step_inside()
+            elif action in {"New Set", "New Routine"}:
                 self.new_command_set()
             elif action == "Save":
                 self.save_named_memory(self.memory_file_name)
@@ -1450,9 +1763,210 @@ class Game:
                 self.memory_browser_open = True
             elif action == "Run Now":
                 self.run_command_set(self.memory_file_name)
-            elif action == "Record Macro":
+            elif action == "Record Routine":
                 self.start_macro_recording()
+            elif action == "Duplicate Routine":
+                self.duplicate_current_routine()
+            elif action == "Rename Routine":
+                if self.editing_history:
+                    self.log("History cannot be renamed.")
+                else:
+                    self.routine_rename_source = self.memory_file_name
+                    self.memory_edit_field = "__memory_file_name__"
+                    self.memory_edit_buffer = self.memory_file_name
+            elif action == "Expand Routine":
+                self.expand_selected_routine_reference()
             return
+
+    def memory_editor_world_at(self, pos: tuple[int, int]) -> tuple[float, float]:
+        camera = self.memory_editor_map_camera
+        if camera is None:
+            return float(self.player.x), float(self.player.y)
+        camera_x, camera_y, zoom = camera
+        local_x = (pos[0] - COMMAND_EDITOR_MAP_RECT.x) / COMMAND_EDITOR_MAP_RECT.width
+        local_y = (pos[1] - COMMAND_EDITOR_MAP_RECT.y) / COMMAND_EDITOR_MAP_RECT.height
+        return (
+            camera_x + local_x * MAP_VIEWPORT.width / zoom,
+            camera_y + local_y * MAP_VIEWPORT.height / zoom,
+        )
+
+    def pan_memory_editor_map(self, delta: tuple[int, int]) -> None:
+        camera = self.memory_editor_map_camera
+        if camera is None:
+            return
+        camera_x, camera_y, zoom = camera
+        camera_x -= (
+            delta[0] * MAP_VIEWPORT.width / COMMAND_EDITOR_MAP_RECT.width / zoom
+        )
+        camera_y -= (
+            delta[1] * MAP_VIEWPORT.height / COMMAND_EDITOR_MAP_RECT.height / zoom
+        )
+        visible_width = MAP_VIEWPORT.width / zoom
+        visible_height = MAP_VIEWPORT.height / zoom
+        self.memory_editor_map_camera = (
+            max(0.0, min(camera_x, max(0.0, self.map.width - visible_width))),
+            max(0.0, min(camera_y, max(0.0, self.map.height - visible_height))),
+            zoom,
+        )
+
+    def zoom_memory_editor_map(self, direction: int, pos: tuple[int, int]) -> None:
+        camera = self.memory_editor_map_camera
+        if camera is None:
+            return
+        world_x, world_y = self.memory_editor_world_at(pos)
+        _camera_x, _camera_y, old_zoom = camera
+        camera_zoom = max(
+            self.camera.min_zoom,
+            min(
+                old_zoom * self.camera.world_scale * (1.12**direction),
+                self.camera.max_zoom,
+            ),
+        )
+        zoom = camera_zoom / self.camera.world_scale
+        local_x = (pos[0] - COMMAND_EDITOR_MAP_RECT.x) / COMMAND_EDITOR_MAP_RECT.width
+        local_y = (pos[1] - COMMAND_EDITOR_MAP_RECT.y) / COMMAND_EDITOR_MAP_RECT.height
+        camera_x = world_x - local_x * MAP_VIEWPORT.width / zoom
+        camera_y = world_y - local_y * MAP_VIEWPORT.height / zoom
+        visible_width = MAP_VIEWPORT.width / zoom
+        visible_height = MAP_VIEWPORT.height / zoom
+        self.memory_editor_map_camera = (
+            max(0.0, min(camera_x, max(0.0, self.map.width - visible_width))),
+            max(0.0, min(camera_y, max(0.0, self.map.height - visible_height))),
+            zoom,
+        )
+
+    def finish_memory_map_selection(self, pos: tuple[int, int]) -> None:
+        if not self.day.remembered_routine:
+            self.memory_map_drag_start = None
+            self.memory_map_drag_current = None
+            return
+        step = self.day.remembered_routine[self.memory_edit_index]
+        start = self.memory_map_drag_start
+        end = (
+            self.memory_editor_world_at(pos)
+            if COMMAND_EDITOR_MAP_RECT.collidepoint(pos)
+            else self.memory_map_drag_current
+        )
+        self.memory_map_drag_start = None
+        self.memory_map_drag_current = None
+        if start is None or end is None or step.action != "Harvest and Eat Berries":
+            return
+        mode = routine_field_editor_value(step, "target_mode")
+        if mode == "area":
+            bounds = tile_aligned_area_bounds(start, end, self.map.tile_map.tile_size)
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                step,
+                target_id=None,
+                target_type="bush",
+                target_point=None,
+                area_bounds=bounds,
+                target_areas=(bounds,),
+                nearest_to_player=False,
+                quantity=1,
+            )
+            return
+        if mode == "specific":
+            bush = next(
+                (
+                    obj
+                    for obj in reversed(list(self.objects.values()))
+                    if obj.active
+                    and obj.type_id == "bush"
+                    and obj.contains((int(end[0]), int(end[1])))
+                ),
+                None,
+            )
+            if bush is None:
+                self.log("Specific target: click a berry bush.")
+                return
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                step,
+                target_id=bush.object_id,
+                target_type="bush",
+                target_point=bush.center,
+                area_bounds=None,
+                target_areas=None,
+                nearest_to_player=False,
+                quantity=1,
+            )
+
+    def memory_field_choices(
+        self, field_name: str
+    ) -> list[tuple[str, object]] | None:
+        if field_name == "action":
+            actions = {"Move To", "Fill Barrel", *NEAREST_AREA_COMMANDS, *BUILD_COMMAND_TYPES}
+            for obj in self.objects.values():
+                actions.update(obj.interactions)
+            return [(action, action) for action in sorted(actions)]
+        if field_name == "target_type":
+            return [("None", None), *((name, name) for name in sorted(self.map.object_types))]
+        if field_name == "target_mode":
+            return [
+                ("Nearest", "nearest"),
+                ("Target", "specific"),
+                ("Area", "area"),
+            ]
+        if field_name in {"till_until_done", "nearest_to_player"}:
+            return [("True", True), ("False", False)]
+        if field_name == "condition_kind":
+            return [("Time", "time"), ("Player stat", "stat"), ("Inventory", "inventory")]
+        if field_name == "condition_operator":
+            return [(operator, operator) for operator in ("=", "!=", "<", "<=", ">", ">=")]
+        if field_name == "condition_subject" and self.day.remembered_routine:
+            step = self.day.remembered_routine[self.memory_edit_index]
+            if step.condition_kind == "time":
+                return [("Game time", "time")]
+            if step.condition_kind == "stat":
+                return [(name.title(), name) for name in sorted(self.player.conditions)]
+            if step.condition_kind == "inventory":
+                return [(name.replace("_", " ").title(), name) for name in sorted(self.player.inventory)]
+        return None
+
+    def select_memory_field_choice(self, field_name: str, value: object) -> None:
+        if not self.day.remembered_routine:
+            return
+        step = self.day.remembered_routine[self.memory_edit_index]
+        if field_name == "action":
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                RoutineStep(None, str(value)),
+                condition_kind=step.condition_kind,
+                condition_subject=step.condition_subject,
+                condition_operator=step.condition_operator,
+                condition_value=step.condition_value,
+            )
+        elif field_name == "target_mode":
+            mode = str(value)
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                step,
+                target_id=(step.target_id if mode == "specific" else None),
+                target_type="bush",
+                target_point=(step.target_point if mode == "specific" else None),
+                area_bounds=(step.area_bounds if mode == "area" else None),
+                target_areas=(
+                    (step.area_bounds,)
+                    if mode == "area" and step.area_bounds is not None
+                    else ()
+                    if mode == "area"
+                    else None
+                ),
+                nearest_to_player=mode == "nearest",
+                quantity=1,
+            )
+        elif field_name == "condition_kind":
+            defaults = {"time": ("time", 12 * 60), "stat": ("fatigue", 50), "inventory": ("pebble", 0)}
+            subject, threshold = defaults[str(value)]
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                step,
+                condition_kind=str(value),
+                condition_subject=subject,
+                condition_value=threshold,
+            )
+        else:
+            self.day.remembered_routine[self.memory_edit_index] = replace(
+                step, **{field_name: value}
+            )
+        self.memory_field_dropdown_open = None
+        self.memory_field_dropdown_buttons.clear()
 
     def new_command_set(self) -> None:
         """Start a blank command set and focus its name for immediate editing."""
@@ -1497,12 +2011,185 @@ class Game:
             if path.is_file()
         ]
 
+    def routine_step_status(self, step: RoutineStep) -> str:
+        """Classify a command as available, temporarily blocked, or invalid."""
+        if step.action == ROUTINE_REFERENCE_ACTION:
+            return "available"
+        if step.action == ROUTINE_END_ACTION:
+            return "available"
+        if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+            valid_subject = (
+                step.condition_subject == "time"
+                if step.condition_kind == "time"
+                else step.condition_subject in self.player.conditions
+                if step.condition_kind == "stat"
+                else step.condition_subject in self.player.inventory
+                if step.condition_kind == "inventory"
+                else False
+            )
+            return (
+                "available"
+                if valid_subject
+                and step.condition_value is not None
+                and step.condition_operator in {"=", "!=", "<", "<=", ">", ">="}
+                else "invalid"
+            )
+        if step.action == "Move To":
+            if step.target_point is None:
+                return "invalid"
+            return "available" if self.build_navigation_path(step.target_point) else "blocked"
+        if step.action == "Fill Barrel":
+            source_areas = step.source_areas or (
+                (step.area_bounds,) if step.area_bounds is not None else ()
+            )
+            target = self.routine_step_target(step)
+            if target is None or not target.active or not source_areas:
+                return "invalid"
+            return "available" if step.action in available_actions(target, self.player) else "blocked"
+        if step.action in {"Drink Water", "Drink Until Full"} and step.target_id is None:
+            if step.target_point is None:
+                return "invalid"
+            return "available" if self.build_navigation_path(step.target_point) else "blocked"
+        if step.action.startswith("Eat ") and step.target_id is None:
+            available = any(
+                carried.active
+                and "edible" in carried.traits
+                and (step.target_type is None or carried.type_id == step.target_type)
+                for carried in self.player.carried_objects
+            )
+            return "available" if available else "blocked"
+        if step.action == "Harvest and Eat Berries":
+            target = self.berry_routine_target(step)
+            if target is None:
+                return "blocked"
+            return "available" if self.build_navigation_path_to_object(target) else "blocked"
+        if step.action in {*NEAREST_AREA_COMMANDS, *BUILD_COMMAND_TYPES}:
+            areas = (
+                ((0, 0, self.map.width, self.map.height),)
+                if step.nearest_to_player
+                else step.target_areas
+                or ((step.area_bounds,) if step.area_bounds is not None else ())
+            )
+            if not areas:
+                return "invalid"
+            if step.action == "Water Crops" and not (
+                step.source_areas or step.secondary_bounds is not None
+            ):
+                return "invalid"
+            available = any(self.build_area_targets(step.action, area) for area in areas)
+            return "available" if available else "blocked"
+        target = self.routine_step_target(step)
+        if target is None or not target.active or step.action not in target.interactions:
+            return "invalid"
+        if step.action not in available_actions(target, self.player):
+            return "blocked"
+        return "available" if self.build_navigation_path_to_object(target) else "blocked"
+
+    def routine_step_target(self, step: RoutineStep) -> WorldObject | None:
+        build_memory_id = self.build_memory_id_for_step(step)
+        if build_memory_id is not None:
+            return self.object_for_build_memory(build_memory_id)
+        return self.objects.get(step.target_id)
+
+    def berry_routine_target(self, step: RoutineStep) -> WorldObject | None:
+        """Choose an available bush using the routine's target mode and path cost."""
+        areas = step.target_areas or (
+            (step.area_bounds,) if step.area_bounds is not None else ()
+        )
+        candidates = [
+            obj
+            for obj in self.objects.values()
+            if obj.active
+            and obj.type_id == "bush"
+            and step.action in available_actions(obj, self.player)
+            and (
+                step.nearest_to_player
+                or any(
+                    left <= obj.center[0] < right and top <= obj.center[1] < bottom
+                    for left, top, right, bottom in areas
+                )
+                or (not areas and obj.object_id == step.target_id)
+            )
+        ]
+        if not candidates:
+            return None
+        if not step.nearest_to_player and not areas:
+            return candidates[0]
+        objects_by_goal: dict[tuple[float, float], list[WorldObject]] = {}
+        for obj in candidates:
+            for point in self.navigation_interaction_points(obj):
+                objects_by_goal.setdefault(point, []).append(obj)
+        path = find_tile_path_to_any(
+            (self.player.x, self.player.y),
+            list(objects_by_goal),
+            self.map.tile_map,
+        )
+        if not path:
+            return None
+        return min(
+            objects_by_goal[path[-1]],
+            key=lambda obj: math.dist(obj.center, path[-1]),
+        )
+
+    def routine_step_can_complete(self, step: RoutineStep) -> bool:
+        return self.routine_step_status(step) == "available"
+
+    def routine_status(
+        self, routine: list[RoutineStep] | tuple[RoutineStep, ...]
+    ) -> str:
+        if not routine:
+            return "invalid"
+        depth = 0
+        for step in routine:
+            if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                depth += 1
+            elif step.action == ROUTINE_END_ACTION:
+                depth -= 1
+                if depth < 0:
+                    return "invalid"
+        if depth:
+            return "invalid"
+        statuses = {self.routine_step_status(step) for step in routine}
+        if "invalid" in statuses:
+            return "invalid"
+        return "blocked" if "blocked" in statuses else "available"
+
+    def routine_can_complete(
+        self, routine: list[RoutineStep] | tuple[RoutineStep, ...]
+    ) -> bool:
+        return self.routine_status(routine) == "available"
+
+    def named_routine_status(self, name: str) -> str:
+        try:
+            routine = load_memory_file(
+                name,
+                tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
+            )
+        except MapLoadError:
+            return "invalid"
+        return self.routine_status(routine)
+
+    def named_routine_can_complete(self, name: str) -> bool:
+        return self.named_routine_status(name) == "available"
+
+    @staticmethod
+    def routine_status_color(status: str, available_color: tuple[int, int, int]) -> tuple[int, int, int]:
+        if status == "invalid":
+            return UNAVAILABLE_ROUTINE_COLOR
+        if status == "blocked":
+            return BLOCKED_ROUTINE_COLOR
+        return available_color
+
     def start_macro_recording(self) -> bool:
         """Record subsequent direct-play commands into the working command set."""
         if self.macro_recording:
             return True
+        if self.editing_history:
+            self.log("History is read-only. Duplicate it before recording changes.")
+            return False
         if self.day.mode is not Mode.DIRECT:
-            self.log("Macros can only be recorded during Direct Control.")
+            self.log("Routines can only be recorded during Direct Control.")
             return False
         self.macro_previous_today_routine = self.day.today_routine
         self.day.today_routine = self.day.remembered_routine
@@ -1511,8 +2198,13 @@ class Game:
         self.record_routine_commands = True
         if self.adjusting_memory:
             self.close_memory_editor()
-        self.log(f"Recording macro for command set {self.memory_file_name or '(unnamed)'!r}.")
+        self.log(f"Recording routine {self.memory_file_name or '(unnamed)'!r}.")
         return True
+
+    def record_player_command(self, step: RoutineStep) -> None:
+        """Record one directly issued command in both active destinations."""
+        self.day.today_routine.append(step)
+        self.day.command_history.append(step)
 
     def stop_macro_recording(self) -> bool:
         if not self.macro_recording:
@@ -1527,11 +2219,141 @@ class Game:
         self.log(f"Stopped macro recording; added {len(recorded)} command(s).")
         return True
 
+    @property
+    def editing_history(self) -> bool:
+        return self.memory_file_name.casefold() == "history"
+
+    def duplicate_current_routine(self, new_name: str | None = None) -> bool:
+        source_name = self.memory_file_name or "Routine"
+        base = new_name or f"{source_name} Copy"
+        candidate = base
+        suffix = 2
+        while memory_file_path(candidate, self.memory_directory).exists():
+            candidate = f"{base} {suffix}"
+            suffix += 1
+        try:
+            save_memory_file(
+                candidate,
+                self.day.remembered_routine,
+                tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
+            )
+        except (MapLoadError, OSError) as exc:
+            self.log(f"Could not duplicate routine: {exc}")
+            return False
+        self.memory_file_name = candidate
+        self.routine_rename_source = candidate
+        self.memory_edit_field = "__memory_file_name__"
+        self.memory_edit_buffer = candidate
+        self.log(f"Duplicated routine as {candidate!r}.")
+        return True
+
+    def rename_current_routine(self, new_name: str) -> bool:
+        old_name = self.memory_file_name.strip()
+        if not old_name or old_name.casefold() == "history":
+            self.log("History cannot be renamed.")
+            return False
+        try:
+            old_path = memory_file_path(old_name, self.memory_directory)
+            new_path = memory_file_path(new_name, self.memory_directory)
+        except MapLoadError as exc:
+            self.log(f"Could not rename routine: {exc}")
+            return False
+        if new_path.exists() and new_path != old_path:
+            self.log(f"A routine named {new_path.stem!r} already exists.")
+            return False
+        if not old_path.exists():
+            self.log(f"Routine {old_name!r} no longer exists.")
+            return False
+        if new_path == old_path:
+            self.routine_rename_source = None
+            self.memory_file_name = new_path.stem
+            return True
+        try:
+            old_path.rename(new_path)
+        except OSError as exc:
+            self.log(f"Could not rename routine: {exc}")
+            return False
+        if old_name in self.memory_favorites:
+            self.memory_favorites.remove(old_name)
+            self.memory_favorites.add(new_path.stem)
+            self.save_memory_favorites()
+        self.day.command_history = [
+            replace(step, routine_name=new_path.stem)
+            if step.action == ROUTINE_REFERENCE_ACTION
+            and step.routine_name == old_name
+            else step
+            for step in self.day.command_history
+        ]
+        self.memory_file_name = new_path.stem
+        self.log(f"Renamed routine to {new_path.stem!r}.")
+        return True
+
+    def expand_selected_routine_reference(self) -> bool:
+        if not self.day.remembered_routine:
+            return False
+        step = self.day.remembered_routine[self.memory_edit_index]
+        if step.action != ROUTINE_REFERENCE_ACTION or not step.routine_name:
+            return False
+        try:
+            expanded = load_memory_file(
+                step.routine_name,
+                tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
+            )
+        except MapLoadError as exc:
+            self.log(f"Could not expand routine: {exc}")
+            return False
+        if self.routine_reference_has_cycle(step.routine_name, set()):
+            self.log("Routine expansion stopped because it contains a reference cycle.")
+            return False
+        self.day.remembered_routine[self.memory_edit_index:self.memory_edit_index + 1] = expanded
+        self.memory_edit_index = min(
+            self.memory_edit_index,
+            max(0, len(self.day.remembered_routine) - 1),
+        )
+        self.log(f"Expanded routine {step.routine_name!r}.")
+        return True
+
+    def routine_reference_has_cycle(self, name: str, visiting: set[str]) -> bool:
+        key = name.casefold()
+        if key in visiting:
+            return True
+        try:
+            routine = load_memory_file(
+                name,
+                tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
+            )
+        except MapLoadError:
+            return False
+        nested = visiting | {key}
+        return any(
+            step.action == ROUTINE_REFERENCE_ACTION
+            and step.routine_name is not None
+            and self.routine_reference_has_cycle(step.routine_name, nested)
+            for step in routine
+        )
+
     def remove_memory_step(self) -> None:
         routine = self.day.remembered_routine
         if not routine:
             return
         removed = self.memory_edit_index
+        action = routine[removed].action
+        paired_index = None
+        if action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+            paired_index = self.matching_routine_end(removed)
+        elif action == ROUTINE_END_ACTION:
+            paired_index = self.matching_routine_opener(removed)
+        if paired_index is not None:
+            routine.pop(max(removed, paired_index))
+            routine.pop(min(removed, paired_index))
+            self.memory_edit_index = min(
+                min(removed, paired_index), max(0, len(routine) - 1)
+            )
+            self.day.replay_index = min(self.day.replay_index, len(routine))
+            return
         routine.pop(removed)
         if self.day.mode is Mode.REPLAY and removed < self.day.replay_index:
             self.day.replay_index -= 1
@@ -1542,6 +2364,9 @@ class Game:
         routine = self.day.remembered_routine
         if not routine:
             return
+        if routine[self.memory_edit_index].action in ROUTINE_CONTROL_ACTIONS:
+            self.log("Select a command inside the block to duplicate it.")
+            return
         insertion = self.memory_edit_index + 1
         routine.insert(insertion, routine[self.memory_edit_index])
         if self.day.mode is Mode.REPLAY and insertion <= self.day.replay_index:
@@ -1551,6 +2376,244 @@ class Game:
     def add_memory_step(self) -> None:
         self.day.remembered_routine.append(RoutineStep(None, "Move To"))
         self.memory_edit_index = len(self.day.remembered_routine) - 1
+
+    def toggle_memory_step_condition(self) -> None:
+        self.wrap_memory_step(ROUTINE_IF_ACTION)
+
+    def add_memory_loop(self) -> None:
+        self.wrap_memory_step(ROUTINE_LOOP_ACTION)
+
+    def wrap_memory_step(self, control_action: str) -> None:
+        if not self.day.remembered_routine:
+            self.add_memory_step()
+        index, end = self.routine_selection_span(self.memory_edit_index)
+        control = RoutineStep(
+            None,
+            control_action,
+            condition_kind="time",
+            condition_subject="time",
+            condition_operator=">=",
+            condition_value=12 * 60,
+        )
+        self.day.remembered_routine.insert(index, control)
+        self.day.remembered_routine.insert(end + 2, RoutineStep(None, ROUTINE_END_ACTION))
+        self.memory_edit_index = index
+
+    def add_memory_step_inside(self) -> None:
+        routine = self.day.remembered_routine
+        if not routine:
+            self.add_memory_step()
+            return
+        insertion = self.memory_edit_index + 1
+        if routine[self.memory_edit_index].action == ROUTINE_END_ACTION:
+            insertion = self.memory_edit_index
+        routine.insert(insertion, RoutineStep(None, "Move To"))
+        self.memory_edit_index = insertion
+
+    def matching_routine_end(self, opener_index: int) -> int | None:
+        depth = 0
+        for index in range(opener_index + 1, len(self.day.remembered_routine)):
+            action = self.day.remembered_routine[index].action
+            if action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                depth += 1
+            elif action == ROUTINE_END_ACTION:
+                if depth == 0:
+                    return index
+                depth -= 1
+        return None
+
+    def matching_routine_opener(self, end_index: int) -> int | None:
+        depth = 0
+        for index in range(end_index - 1, -1, -1):
+            action = self.day.remembered_routine[index].action
+            if action == ROUTINE_END_ACTION:
+                depth += 1
+            elif action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                if depth == 0:
+                    return index
+                depth -= 1
+        return None
+
+    def routine_selection_span(self, index: int) -> tuple[int, int]:
+        action = self.day.remembered_routine[index].action
+        if action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+            end = self.matching_routine_end(index)
+            return index, end if end is not None else index
+        if action == ROUTINE_END_ACTION:
+            opener = self.matching_routine_opener(index)
+            return (opener, index) if opener is not None else (index, index)
+        return index, index
+
+    def indent_memory_step(self, direction: int) -> bool:
+        """Move the selected command/block in or out by one structural level."""
+        routine = self.day.remembered_routine
+        if not routine:
+            return False
+        start, end = self.routine_selection_span(self.memory_edit_index)
+        replay_step = (
+            routine[self.day.replay_index]
+            if self.day.mode is Mode.REPLAY
+            and self.day.replay_index < len(routine)
+            else None
+        )
+        if direction > 0:
+            if start == 0 or routine[start - 1].action != ROUTINE_END_ACTION:
+                self.log("Tab needs a preceding condition or repeat block.")
+                return False
+            destination = start - 1
+        else:
+            parent_opener = None
+            for candidate in range(start - 1, -1, -1):
+                if routine[candidate].action not in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                    continue
+                candidate_end = self.matching_routine_end(candidate)
+                if candidate_end is not None and candidate_end >= end:
+                    parent_opener = candidate
+                    break
+            if parent_opener is None:
+                self.log("The selection is already at the outermost level.")
+                return False
+            parent_end = self.matching_routine_end(parent_opener)
+            if parent_end is None:
+                return False
+            destination = parent_end + 1
+
+        segment = routine[start : end + 1]
+        del routine[start : end + 1]
+        if destination > end:
+            destination -= len(segment)
+        routine[destination:destination] = segment
+        self.memory_edit_index = destination
+        if replay_step is not None:
+            self.day.replay_index = next(
+                (
+                    index
+                    for index, step in enumerate(routine)
+                    if step is replay_step
+                ),
+                min(self.day.replay_index, len(routine)),
+            )
+        return True
+
+    def routine_step_depth(self, index: int) -> int:
+        depth = 0
+        for step in self.day.remembered_routine[:index]:
+            if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                depth += 1
+            elif step.action == ROUTINE_END_ACTION:
+                depth = max(0, depth - 1)
+        if self.day.remembered_routine[index].action == ROUTINE_END_ACTION:
+            depth = max(0, depth - 1)
+        return depth
+
+    def routine_step_display_label(self, index: int) -> str:
+        step = self.day.remembered_routine[index]
+        number = self.routine_step_number(index)
+        if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+            return f"{number}. {self.routine_condition_label(step)}"
+        if step.action == ROUTINE_END_ACTION:
+            opener = self.matching_routine_opener(index)
+            return (
+                "End Repeat"
+                if opener is not None
+                and self.day.remembered_routine[opener].action == ROUTINE_LOOP_ACTION
+                else "End If"
+            )
+        if step.action == ROUTINE_REFERENCE_ACTION:
+            return f"{number}. Played Routine: {step.routine_name or '(missing)'}"
+        quantity = f" ×{step.quantity}" if step.quantity is not None else ""
+        return f"{number}. {step.action}{quantity}"
+
+    def routine_step_number(self, index: int) -> int:
+        """Number commands and controls among siblings in one structural block."""
+        depth = self.routine_step_depth(index)
+        scope_start = 0
+        openers: list[int] = []
+        for candidate, step in enumerate(self.day.remembered_routine[:index]):
+            if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                openers.append(candidate)
+            elif step.action == ROUTINE_END_ACTION and openers:
+                openers.pop()
+        if openers:
+            scope_start = openers[-1] + 1
+        return 1 + sum(
+            step.action != ROUTINE_END_ACTION
+            and self.routine_step_depth(candidate) == depth
+            for candidate, step in enumerate(
+                self.day.remembered_routine[scope_start:index], start=scope_start
+            )
+        )
+
+    def routine_condition_label(self, step: RoutineStep) -> str:
+        subject = (step.condition_subject or step.condition_kind or "value").replace("_", " ")
+        value: object = step.condition_value
+        if step.condition_kind == "time" and step.condition_value is not None:
+            minutes = round(step.condition_value) % (24 * 60)
+            hour, minute = divmod(minutes, 60)
+            suffix = "AM" if hour < 12 else "PM"
+            value = f"{12 if hour % 12 == 0 else hour % 12}:{minute:02d} {suffix}"
+        prefix = "Repeat until" if step.action == ROUTINE_LOOP_ACTION else "If"
+        return f"{prefix} {subject} {step.condition_operator} {value}"
+
+    def routine_step_condition_met(self, step: RoutineStep) -> bool:
+        if step.condition_kind is None:
+            return True
+        if step.condition_value is None:
+            return False
+        if step.condition_kind == "time":
+            actual = float(self.day.current_time_minutes)
+        elif step.condition_kind == "stat":
+            if step.condition_subject not in self.player.conditions:
+                return False
+            actual = float(self.player.conditions[step.condition_subject])
+        elif step.condition_kind == "inventory":
+            if step.condition_subject not in self.player.inventory:
+                return False
+            actual = float(self.player.inventory[step.condition_subject])
+        else:
+            return False
+        expected = float(step.condition_value)
+        comparisons = {
+            "=": actual == expected,
+            "!=": actual != expected,
+            "<": actual < expected,
+            "<=": actual <= expected,
+            ">": actual > expected,
+            ">=": actual >= expected,
+        }
+        return comparisons.get(step.condition_operator, False)
+
+    def routine_block_has_executable_command(
+        self, start_index: int, end_index: int
+    ) -> bool:
+        """Return whether a reachable command in a control block can run now."""
+        index = start_index
+        while index < end_index:
+            step = self.day.remembered_routine[index]
+            if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                nested_end = self.matching_routine_end(index)
+                if nested_end is None or nested_end > end_index:
+                    return False
+                condition_met = self.routine_step_condition_met(step)
+                enters_block = (
+                    not condition_met
+                    if step.action == ROUTINE_LOOP_ACTION
+                    else condition_met
+                )
+                if enters_block and self.routine_block_has_executable_command(
+                    index + 1, nested_end
+                ):
+                    return True
+                index = nested_end + 1
+                continue
+            if (
+                step.action != ROUTINE_END_ACTION
+                and self.routine_step_condition_met(step)
+                and self.routine_step_status(step) == "available"
+            ):
+                return True
+            index += 1
+        return False
 
     def commit_memory_field(self) -> None:
         if self.memory_edit_field == "__memory_file_name__":
@@ -1563,9 +2626,15 @@ class Game:
             except MapLoadError as exc:
                 self.log(str(exc))
                 return
-            self.memory_file_name = (
-                self.memory_edit_buffer.removesuffix(".jsonc").removesuffix(".memory")
-            )
+            new_name = self.memory_edit_buffer.removesuffix(".jsonc").removesuffix(".memory")
+            if self.routine_rename_source is not None:
+                source = self.routine_rename_source
+                self.routine_rename_source = None
+                self.memory_file_name = source
+                if not self.rename_current_routine(new_name):
+                    return
+            else:
+                self.memory_file_name = new_name
             self.memory_edit_field = None
             self.memory_edit_buffer = ""
             return
@@ -1584,7 +2653,13 @@ class Game:
                 value = routine_field_runtime_value(field_name, value)
             elif field_name == "action" and not isinstance(value, str):
                 raise ValueError("action requires a JSON string")
-            elif field_name in {"target_type", "target_build_memory"} and not (
+            elif field_name in {
+                "target_type",
+                "target_build_memory",
+                "condition_kind",
+                "condition_subject",
+                "condition_operator",
+            } and not (
                 value is None or isinstance(value, str)
             ):
                 raise ValueError(f"{field_name} requires a JSON string or null")
@@ -1598,6 +2673,8 @@ class Game:
                 value, bool
             ):
                 raise ValueError(f"{field_name} requires true or false")
+            elif field_name == "condition_value" and not isinstance(value, (int, float)):
+                raise ValueError("condition_value requires a number")
             step = self.day.remembered_routine[self.memory_edit_index]
             self.day.remembered_routine[self.memory_edit_index] = replace(
                 step, **{field_name: value}
@@ -1623,7 +2700,17 @@ class Game:
             f"Saved {len(self.day.remembered_routine)} orders to {path.name}."
         )
 
-    def load_named_memory(self, name: str) -> None:
+    def load_named_memory(self, name: str) -> bool:
+        if name.casefold() == "history":
+            self.day.remembered_routine = list(self.day.command_history)
+            self.memory_file_name = "History"
+            self.day.replay_index = 0
+            self.memory_edit_index = min(
+                self.memory_edit_index,
+                max(0, len(self.day.remembered_routine) - 1),
+            )
+            self.log(f"Loaded History ({len(self.day.remembered_routine)} commands).")
+            return True
         try:
             routine = load_memory_file(
                 name,
@@ -1632,7 +2719,7 @@ class Game:
             )
         except MapLoadError as exc:
             self.log(f"Could not load command set: {exc}")
-            return
+            return False
         self.day.remembered_routine = list(routine)
         self.memory_file_name = name.removesuffix(".jsonc").removesuffix(".memory")
         self.day.replay_index = 0
@@ -1643,6 +2730,28 @@ class Game:
             f"Loaded {len(routine)} orders from "
             f"{memory_file_path(name, self.memory_directory).name}."
         )
+        return True
+
+    def select_routine_dropdown_entry(self, name: str) -> None:
+        self.macro_dropdown_open = False
+        if name == "__new__":
+            self.open_memory_editor()
+            self.new_command_set()
+            return
+        self.memory_file_name = name
+        self.load_named_memory(name)
+
+    def play_selected_macro(self) -> bool:
+        name = self.memory_file_name.strip()
+        if not name:
+            self.log("Select a macro before pressing Play.")
+            return False
+        if name.casefold() == "history":
+            self.log("History is read-only; duplicate it to create a playable routine.")
+            return False
+        if not self.load_named_memory(name):
+            return False
+        return self.run_command_set(name)
 
     def run_command_set(self, name: str) -> bool:
         if self.day.mode is not Mode.DIRECT:
@@ -1654,6 +2763,9 @@ class Game:
         if not self.day.remembered_routine:
             self.log("The command set is empty.")
             return False
+        self.day.command_history.append(
+            RoutineStep(None, ROUTINE_REFERENCE_ACTION, routine_name=name)
+        )
         self.running_command_set_name = name or "unnamed"
         self.day.mode = Mode.REPLAY
         self.day.replay_index = 0
@@ -1670,6 +2782,9 @@ class Game:
     def move_memory_step(self, direction: int) -> None:
         routine = self.day.remembered_routine
         if not routine:
+            return
+        if routine[self.memory_edit_index].action in ROUTINE_CONTROL_ACTIONS:
+            self.log("Condition and repeat blocks keep their structural position.")
             return
         destination = self.memory_edit_index + direction
         if not 0 <= destination < len(routine):
@@ -1742,6 +2857,7 @@ class Game:
     def handle_context_click(self, pos: tuple[int, int]) -> None:
         self.context_inventory_item_id = None
         self.context_boundary_id = None
+        self.context_option_target_ids = []
         world_pos = self.screen_to_world(pos)
         if world_pos is None:
             return
@@ -1751,26 +2867,20 @@ class Game:
             self.selected_tile = None
             self.context_boundary_id = door.boundary_id
             self.context_menu_options = ["Open Door" if not door.open else "Close Door"]
+            self.context_option_target_ids = [None]
             self.context_menu_pos = pos
             self.context_ground_target = None
             self.preview_path = []
             return
-        for obj in reversed(list(self.objects.values())):
-            if obj.contains(world_pos):
-                self.selected_id = obj.object_id
-                self.selected_tile = None
-                self.path_target = (float(obj.x + obj.width // 2), float(obj.y + obj.height // 2))
-                self.preview_path = self.build_navigation_path_to_object(obj)[1:]
-                if self.day.mode is Mode.DIRECT:
-                    self.context_ground_target = None
-                    self.show_context_menu(obj, pos, world_pos)
-                return
-        self.selected_id = None
+        targets = [
+            obj
+            for obj in reversed(list(self.objects.values()))
+            if obj.active and obj.contains(world_pos)
+        ]
         located = self.map.tile_map.tile_at_world(*world_pos)
         self.selected_tile = (located[0], located[1]) if located is not None else None
         target = self.map.tile_map.center_at_world(*world_pos)
-        self.path_target = target
-        self.context_menu_options = (
+        ground_options = (
             build_ground_context_menu_options(
                 located[2],
                 self.player,
@@ -1780,6 +2890,28 @@ class Game:
             if target is not None and located is not None
             else []
         )
+        if targets:
+            primary = targets[0]
+            self.selected_id = primary.object_id
+            self.selected_tile = None
+            self.path_target = primary.center
+            self.preview_path = self.build_navigation_path_to_object(primary)[1:]
+            if self.day.mode is Mode.REPLAY:
+                return
+            self.context_menu_options = ["Move To"]
+            self.context_option_target_ids = [primary.object_id]
+            for obj in targets:
+                actions = object_action_menu_options(obj, self.player)
+                self.context_menu_options.extend(actions)
+                self.context_option_target_ids.extend([obj.object_id] * len(actions))
+            tile_actions = ground_options[1:] if ground_options[:1] == ["Move To"] else ground_options
+            self.context_menu_options.extend(tile_actions)
+            self.context_option_target_ids.extend([None] * len(tile_actions))
+        else:
+            self.selected_id = None
+            self.path_target = target
+            self.context_menu_options = ground_options
+            self.context_option_target_ids = [None] * len(ground_options)
         self.context_menu_pos = pos if target is not None else None
         self.context_ground_target = target
         self.preview_path = []
@@ -1793,6 +2925,7 @@ class Game:
             self.context_menu_pos = None
             return
         self.context_menu_options = options
+        self.context_option_target_ids = [obj.object_id] * len(options)
         self.context_menu_pos = screen_pos
         self.context_ground_target = None
         self.selected_id = obj.object_id
@@ -1801,6 +2934,11 @@ class Game:
         if not 0 <= index < len(self.context_menu_options):
             return
         option = self.context_menu_options[index]
+        option_target_id = (
+            self.context_option_target_ids[index]
+            if len(self.context_option_target_ids) == len(self.context_menu_options)
+            else self.selected_id
+        )
         if not action_option_enabled(option):
             if option == RUINED_BUCKET_REQUIRED:
                 self.log("The ruined bucket cannot hold water.")
@@ -1808,6 +2946,7 @@ class Game:
         inventory_item_id = self.context_inventory_item_id
         boundary_id = self.context_boundary_id
         self.context_menu_options = []
+        self.context_option_target_ids = []
         self.context_menu_pos = None
         self.context_inventory_item_id = None
         self.context_boundary_id = None
@@ -1837,16 +2976,16 @@ class Game:
             ):
                 if self.record_routine_commands:
                     self.record_rewind_checkpoint(option)
-                    self.day.today_routine.append(
+                    self.record_player_command(
                         RoutineStep(None, option, food.type_id)
                     )
                 self.consume_carried_food(food, "from inventory")
             return
-        if option == "Fill Barrel" and self.selected_id is not None:
-            self.begin_barrel_source_selection(self.selected_id)
+        if option == "Fill Barrel" and option_target_id is not None:
+            self.begin_barrel_source_selection(option_target_id)
             return
         if option == "Move To":
-            if self.selected_id is None:
+            if option_target_id is None:
                 if self.context_ground_target is not None and self.plan_path(self.context_ground_target):
                     self.resume_for_command()
                     self.path_target = self.context_ground_target
@@ -1855,7 +2994,7 @@ class Game:
                     self.log("No route to selected location.")
                 self.context_ground_target = None
                 return
-            target = self.objects[self.selected_id]
+            target = self.objects[option_target_id]
             if self.plan_path_to_object(target):
                 self.resume_for_command()
                 self.path_target = target.center
@@ -1864,7 +3003,7 @@ class Game:
                 self.log(f"No route to {target.name}.")
             self.context_ground_target = None
             return
-        if option == "Drop Bucket" and self.selected_id is None:
+        if option == "Drop Bucket" and option_target_id is None:
             target = self.context_ground_target
             if target is not None and self.plan_path(target):
                 self.pending_area_target = AreaTarget("Drop Bucket", target)
@@ -1873,15 +3012,21 @@ class Game:
                 self.path_target = target
             self.context_ground_target = None
             return
-        if option == "Drink Water" and self.selected_id is None:
+        if option in {"Drink Water", "Drink Until Full"} and option_target_id is None:
             target = self.context_ground_target
-            if target is not None and self.queue_terrain_drink(target, record=True):
-                self.log("Going to drink water.")
+            if target is not None and self.queue_terrain_drink(
+                target, record=True, until_full=option == "Drink Until Full"
+            ):
+                self.log(
+                    "Going to drink until full."
+                    if option == "Drink Until Full"
+                    else "Going to drink water."
+                )
             else:
                 self.log("That terrain action is unavailable.")
             self.context_ground_target = None
             return
-        if option in {"Gather Water", "Water Crop", "Tend Plant"} and self.selected_id is None:
+        if option in {"Gather Water", "Water Crop", "Tend Plant"} and option_target_id is None:
             target = self.context_ground_target
             located = self.map.tile_map.tile_at_world(*target) if target is not None else None
             state = self.map.tile_states.get((located[0], located[1])) if located is not None else None
@@ -1920,12 +3065,16 @@ class Game:
                 self.log("That terrain action is unavailable.")
             self.context_ground_target = None
             return
-        if self.selected_id is None:
+        if option_target_id is None:
             return
-        self.queue_job(self.selected_id, option, record=True)
+        self.queue_job(option_target_id, option, record=True)
 
     def queue_terrain_drink(
-        self, target: tuple[float, float], *, record: bool
+        self,
+        target: tuple[float, float],
+        *,
+        record: bool,
+        until_full: bool = False,
     ) -> bool:
         located = self.map.tile_map.tile_at_world(*target)
         if (
@@ -1934,14 +3083,15 @@ class Game:
             or not self.plan_path(target)
         ):
             return False
-        self.pending_area_target = AreaTarget("Drink Water", target)
+        action = "Drink Until Full" if until_full else "Drink Water"
+        self.pending_area_target = AreaTarget(action, target)
         self.area_job_timer = 0.0
         self.resume_for_command()
         self.path_target = target
         if record and self.record_routine_commands:
-            self.record_rewind_checkpoint("Drink Water")
-            self.day.today_routine.append(
-                RoutineStep(None, "Drink Water", target_point=target)
+            self.record_rewind_checkpoint(action)
+            self.record_player_command(
+                RoutineStep(None, action, target_point=target)
             )
         return True
 
@@ -1988,32 +3138,15 @@ class Game:
             self.active_command_category = None
             self.active_command = None
             return
-        self.active_command = selected
-        suffix = (
-            " Or click the character to choose the nearest amount."
-            if selected in NEAREST_AREA_COMMANDS
-            else ""
-        )
-        self.log(f"{selected}: drag a rectangle on the map.{suffix}")
+        self.select_area_command(selected)
 
-    def screen_to_world(self, pos: tuple[int, int]) -> tuple[int, int] | None:
-        return self.camera.screen_to_world(pos)
-
-    def finish_command_drag(self, screen_pos: tuple[int, int]) -> None:
-        end = self.camera.screen_to_world(screen_pos)
-        start = self.command_drag_start
-        self.command_drag_start = None
-        self.command_drag_current = None
-        if start is None or end is None or self.active_command is None:
-            return
+    def select_area_command(self, command: str) -> None:
+        self.pending_target_areas.clear()
         if (
-            self.active_command in NEAREST_AREA_COMMANDS
-            and math.dist(end, (self.player.x, self.player.y)) <= self.player_radius
-            and math.dist(start, end) <= self.player_radius
+            self.target_selection_mode == "nearest"
+            and command in NEAREST_AREA_COMMANDS
         ):
-            command = self.active_command
             self.active_command = None
-            self.pending_target_areas.clear()
             self.queue_nearest_area_command(
                 command,
                 self.area_command_quantity,
@@ -2030,6 +3163,75 @@ class Game:
                 ),
             )
             return
+        self.active_command = command
+        self.log(self.target_selection_prompt(command))
+
+    def set_target_selection_mode(self, mode: str) -> None:
+        if mode not in {"nearest", "target", "area"}:
+            return
+        self.target_selection_mode = mode
+        self.command_drag_start = None
+        self.command_drag_current = None
+        self.pending_target_areas.clear()
+        if self.active_command is None:
+            return
+        command = self.active_command
+        if mode == "nearest" and command in NEAREST_AREA_COMMANDS:
+            self.active_command = None
+            self.queue_nearest_area_command(
+                command,
+                self.area_command_quantity,
+                record=True,
+                max_game_minutes=(
+                    None
+                    if command == "Till Grassland" and self.till_until_done
+                    else self.till_max_game_minutes
+                    if command == "Till Grassland"
+                    else None
+                ),
+                till_until_done=(
+                    self.till_until_done if command == "Till Grassland" else False
+                ),
+            )
+            return
+        self.log(self.target_selection_prompt(command))
+
+    def target_selection_prompt(self, command: str) -> str:
+        if self.target_selection_mode == "target":
+            return f"{command}: click an x, y target on the map."
+        if self.target_selection_mode == "area":
+            return f"{command}: drag an area target on the map."
+        return f"{command}: use targets nearest to the character."
+
+    def target_selection_summary(self) -> str:
+        point = self.command_drag_current or self.command_drag_start
+        if point is None:
+            return "Target: select x, y" if self.target_selection_mode == "target" else "Area: select on map"
+        size = self.map.tile_map.tile_size
+        if self.target_selection_mode == "target":
+            return f"Target: ({int(point[0] // size)}, {int(point[1] // size)})"
+        start = self.command_drag_start or point
+        left, top, right, bottom = tile_aligned_area_bounds(start, point, size)
+        return (
+            f"Area: ({left // size}, {top // size})–"
+            f"({right // size - 1}, {bottom // size - 1})"
+        )
+
+    def screen_to_world(self, pos: tuple[int, int]) -> tuple[int, int] | None:
+        return self.camera.screen_to_world(pos)
+
+    def finish_command_drag(self, screen_pos: tuple[int, int]) -> None:
+        end = self.camera.screen_to_world(screen_pos)
+        start = self.command_drag_start
+        self.command_drag_start = None
+        self.command_drag_current = None
+        if start is None or end is None or self.active_command is None:
+            return
+        if (
+            self.target_selection_mode == "target"
+            and self.active_command not in {"Fill Barrel", "Water Crops Source"}
+        ):
+            start = end
         left, top, right, bottom = tile_aligned_area_bounds(
             start, end, self.map.tile_map.tile_size
         )
@@ -2076,9 +3278,6 @@ class Game:
                 )
             return
         if self.active_command in BUILD_COMMAND_TYPES:
-            left, top, right, bottom = tile_aligned_area_bounds(
-                end, end, self.map.tile_map.tile_size
-            )
             quantity = 1
         gather_commands = {*AREA_COMMAND_TYPES, "Chop Trees"}
         if self.active_command in gather_commands:
@@ -2183,7 +3382,7 @@ class Game:
         self.barrel_fill_job = BarrelFillJob(barrel_id, source_areas)
         if record and self.record_routine_commands:
             self.record_rewind_checkpoint("Fill Barrel")
-            self.day.today_routine.append(
+            self.record_player_command(
                 RoutineStep(
                     barrel_id,
                     "Fill Barrel",
@@ -2220,7 +3419,7 @@ class Game:
         crop_points = crop_points[:quantity]
         if record and self.record_routine_commands:
             self.record_rewind_checkpoint("Water Crops")
-            self.day.today_routine.append(
+            self.record_player_command(
                 RoutineStep(
                     None,
                     "Water Crops",
@@ -2361,7 +3560,7 @@ class Game:
         self.area_job_timer = 0.0
         if record and self.record_routine_commands:
             self.record_rewind_checkpoint(command)
-            self.day.today_routine.append(
+            self.record_player_command(
                 RoutineStep(
                     None,
                     command,
@@ -2671,15 +3870,9 @@ class Game:
         if self.pending_job is not None:
             return False
         obj = self.objects.get(target_id)
-        nap_window: str | None = None
         if action == "Power Nap":
-            nap_window = self.power_nap_window()
-            if (
-                nap_window is None
-                or nap_window in self.player.used_nap_windows
-                or self.player.conditions["fatigue"] <= 0
-            ):
-                self.log("A power nap is not available now.")
+            if self.player.conditions["fatigue"] <= 0:
+                self.log("You are already fully rested.")
                 return False
         if obj is None or action not in available_actions(obj, self.player):
             self.log(f"Skipped unavailable job: {action}.")
@@ -2700,15 +3893,13 @@ class Game:
                 )
             return False
         self.pending_job = PendingJob(target_id, action, self.walk_target, advances_replay)
-        if nap_window is not None:
-            self.player.used_nap_windows.add(nap_window)
         self.resume_for_command()
         self.selected_id = None
         self.preview_path = []
         self.job_timer = 0.0
         if record and self.record_routine_commands and action != "Sleep":
             self.record_rewind_checkpoint(action)
-            self.day.today_routine.append(
+            self.record_player_command(
                 RoutineStep(
                     target_id,
                     action,
@@ -2720,14 +3911,6 @@ class Game:
                 )
             )
         return True
-
-    def power_nap_window(self) -> str | None:
-        minutes = self.day.current_time_minutes
-        if 13 * 60 <= minutes < 17 * 60:
-            return "early"
-        if 17 * 60 <= minutes < 21 * 60:
-            return "late"
-        return None
 
     def resolve_routine_target(self, step: RoutineStep) -> int | None:
         """Resolve an object-specific order without changing what it referred to."""
@@ -2782,12 +3965,24 @@ class Game:
         return [start, *tile_path]
 
     def build_navigation_path_to_object(self, obj: WorldObject) -> list[tuple[float, float]]:
+        candidates = self.navigation_interaction_points(obj)
+        path = find_tile_path_to_any(
+            (self.player.x, self.player.y), candidates, self.map.tile_map
+        )
+        return path or []
+
+    def navigation_interaction_points(
+        self, obj: WorldObject
+    ) -> list[tuple[float, float]]:
         tile_map = self.map.tile_map
         size = tile_map.tile_size
-        first_column = obj.x // size
-        last_column = (obj.x + obj.width - 1) // size
-        first_row = obj.y // size
-        last_row = (obj.y + obj.height - 1) // size
+        support_id = obj.state.get("support_id")
+        support = self.objects.get(support_id) if isinstance(support_id, int) else None
+        interaction_body = support if support is not None and support.active else obj
+        first_column = interaction_body.x // size
+        last_column = (interaction_body.x + interaction_body.width - 1) // size
+        first_row = interaction_body.y // size
+        last_row = (interaction_body.y + interaction_body.height - 1) // size
         candidates: list[tuple[float, float]] = []
         for row in range(first_row - 1, last_row + 2):
             for column in range(first_column - 1, last_column + 2):
@@ -2798,12 +3993,11 @@ class Game:
                     tile_map.tile_at(column, row) is not None
                     and self.can_stand_at(*center)
                     and distance_to_object(center, obj) <= self.interaction_distance
-                    and self.tile_can_access_object(column, row, obj)
+                    and self.tile_can_access_object(column, row, interaction_body)
                 ):
                     candidates.append(center)
 
-        path = find_tile_path_to_any((self.player.x, self.player.y), candidates, tile_map)
-        return path or []
+        return candidates
 
     def tile_can_access_object(self, column: int, row: int, obj: WorldObject) -> bool:
         """Return whether a tile shares an open cardinal edge with an object."""
@@ -2848,8 +4042,18 @@ class Game:
         return candidate.passable[candidate_edge] and object_tile.passable[object_edge]
 
     def move_along_path(self, dt: float) -> bool:
+        trauma = float(self.player.conditions.get("trauma", 0.0))
+        injury = max(0.0, min(1.0, (trauma - 25.0) / 75.0))
+        pace = 1.0
+        if injury > 0.0:
+            self.stagger_phase = (self.stagger_phase + dt * (3.5 + injury * 2.5)) % math.tau
+            pace = 1.0 - injury * (0.18 + 0.32 * (0.5 + 0.5 * math.sin(self.stagger_phase * 1.7)))
         remaining_distance = max(
-            0.0, self.player.speed * movement_speed_multiplier(self.player) * dt
+            0.0,
+            self.player.speed
+            * movement_speed_multiplier(self.player)
+            * pace
+            * dt,
         )
         while self.navigation_path and remaining_distance > 0.0:
             target_x, target_y = self.navigation_path[0]
@@ -2872,12 +4076,28 @@ class Game:
                 self.navigation_path.pop(0)
                 continue
             amount = min(distance, remaining_distance)
-            next_x = self.player.x + dx / distance * amount
-            next_y = self.player.y + dy / distance * amount
+            heading_x, heading_y = dx / distance, dy / distance
+            if injury > 0.0 and amount < distance:
+                # Rotate the intended heading from side to side. Re-aiming at
+                # the waypoint each tick keeps the stagger inside pathfinding.
+                angle = math.sin(self.stagger_phase) * math.radians(24.0) * injury
+                cosine, sine = math.cos(angle), math.sin(angle)
+                stagger_x = heading_x * cosine - heading_y * sine
+                stagger_y = heading_x * sine + heading_y * cosine
+                next_x = self.player.x + stagger_x * amount
+                next_y = self.player.y + stagger_y * amount
+            else:
+                next_x = self.player.x + heading_x * amount
+                next_y = self.player.y + heading_y * amount
             if not self.can_stand_at(next_x, next_y):
-                self.navigation_path = []
-                self.walk_target = None
-                return False
+                # Near obstacles, prefer the safe center line to abandoning
+                # an otherwise valid route because of a cosmetic stumble.
+                next_x = self.player.x + heading_x * amount
+                next_y = self.player.y + heading_y * amount
+                if not self.can_stand_at(next_x, next_y):
+                    self.navigation_path = []
+                    self.walk_target = None
+                    return False
             self.player.x = next_x
             self.player.y = next_y
             remaining_distance -= amount
@@ -3443,6 +4663,7 @@ class Game:
         if self.day.mode is Mode.DIRECT and not self.has_queued_command():
             self.simulation_paused = True
         self.update_condition_thoughts(dt)
+        self.update_object_memories(dt)
         if self.day.mode is Mode.MORNING:
             self.simulation_step_accumulator = 0.0
             self._update_simulation_tick(0.0)
@@ -3479,28 +4700,27 @@ class Game:
             self.day_position_history.append(position)
 
     def record_rewind_checkpoint(self, action: str) -> None:
-        """Capture the world immediately before a recorded command begins."""
-        tile_visuals = {
-            (column, row): (tile.kind, tuple(tile.properties))
-            for row in range(self.map.tile_map.rows)
-            for column in range(self.map.tile_map.columns)
-            if (tile := self.map.tile_map.tile_at(column, row)) is not None
-        }
-        snapshot: dict[str, object] = {
-            "objects": copy.deepcopy(self.objects),
-            "tile_states": copy.deepcopy(self.map.tile_states),
-            "tile_visuals": tile_visuals,
-            "inventory": copy.deepcopy(self.player.inventory),
-            "player_equipment": (
-                self.player.has_hoe,
-                self.player.carrying_hoe,
-                self.player.hoe_quality,
-                self.player.has_axe,
-                self.player.carrying_axe,
-            ),
-        }
+        """Capture the mutable world immediately before a command starts."""
         self.rewind_checkpoints.append(
-            (len(self.day_position_history) - 1, action, snapshot)
+            (
+                len(self.day_position_history) - 1,
+                action,
+                {
+                    "objects": copy.deepcopy(self.objects),
+                    "tile_states": copy.deepcopy(self.map.tile_states),
+                    "tile_kinds": tuple(
+                        tile.kind for tile in self.map.tile_map.tiles
+                    ),
+                    "inventory": copy.deepcopy(self.player.inventory),
+                    "equipment": (
+                        self.player.has_hoe,
+                        self.player.carrying_hoe,
+                        self.player.hoe_quality,
+                        self.player.has_axe,
+                        self.player.carrying_axe,
+                    ),
+                },
+            )
         )
 
     def restore_rewind_checkpoint(self, snapshot: dict[str, object]) -> None:
@@ -3510,22 +4730,15 @@ class Game:
         self.objects = objects
         self.map.objects = objects
         self.map.tile_states = copy.deepcopy(snapshot["tile_states"])
+        for position, state in self.rewind_persistent_tile_states.items():
+            self.map.tile_states[position] = copy.deepcopy(state)
         rebuild_tile_map(self.map)
-        tile_visuals = snapshot["tile_visuals"]
-        for position, (kind, properties) in tile_visuals.items():
+        for tile, kind in zip(self.map.tile_map.tiles, snapshot["tile_kinds"]):
+            tile.kind = kind
+        for position, kind in self.rewind_persistent_tile_kinds.items():
             tile = self.map.tile_map.tile_at(*position)
             if tile is not None:
                 tile.kind = kind
-                tile.properties = list(properties)
-        for position, (kind, properties, state) in self.rewind_persistent_tiles.items():
-            tile = self.map.tile_map.tile_at(*position)
-            if tile is not None:
-                tile.kind = kind
-                tile.properties = list(properties)
-            if state is None:
-                self.map.tile_states.pop(position, None)
-            else:
-                self.map.tile_states[position] = copy.deepcopy(state)
         self.player.inventory = copy.deepcopy(snapshot["inventory"])
         (
             self.player.has_hoe,
@@ -3533,9 +4746,9 @@ class Game:
             self.player.hoe_quality,
             self.player.has_axe,
             self.player.carrying_axe,
-        ) = snapshot["player_equipment"]
+        ) = snapshot["equipment"]
         self.player.carried_objects = [
-            obj for obj in objects.values() if obj.container == "player" and obj.active
+            obj for obj in objects.values() if obj.active and obj.container == "player"
         ]
         self.storage_memories = self.load_storage_memories()
 
@@ -3662,7 +4875,11 @@ class Game:
             duration = object_job_duration_seconds(
                 self.pending_job.action, target, self.player.has_basket
             )
-            if self.pending_job.action in {"Harvest Berries", "Harvest Wheat"}:
+            if self.pending_job.action in {
+                "Harvest Berries",
+                "Harvest and Eat Berries",
+                "Harvest Wheat",
+            }:
                 duration /= self.skill_speed_multiplier("harvesting")
             if duration > 0.0:
                 return (
@@ -3685,6 +4902,72 @@ class Game:
         else:
             return action
         return f"{action} — {milestone}"
+
+    def object_memory_refs(self, obj: WorldObject) -> tuple[str, ...]:
+        """Combine authored type memories with references learned at runtime."""
+        authored = self.map.object_types[obj.type_id].memory_refs
+        runtime = obj.state.get("memory_refs", [])
+        if not isinstance(runtime, list):
+            runtime = []
+        return tuple(dict.fromkeys((*authored, *(str(value) for value in runtime))))
+
+    def add_object_memory(self, obj: WorldObject, memory_id: str) -> bool:
+        """Attach a catalog memory to one object, preserving it with object state."""
+        if memory_id not in self.map.object_memories:
+            raise ValueError(f"Unknown object memory {memory_id!r}")
+        refs = obj.state.setdefault("memory_refs", [])
+        if not isinstance(refs, list):
+            refs = []
+            obj.state["memory_refs"] = refs
+        if memory_id in refs or memory_id in self.map.object_types[obj.type_id].memory_refs:
+            return False
+        refs.append(memory_id)
+        return True
+
+    def update_object_memories(self, dt: float) -> None:
+        """Roll each nearby memory at most once per day."""
+        if self.day.mode is not Mode.DIRECT or self.thought_bubble_text is not None:
+            return
+        self.object_memory_check_accumulator += dt
+        if self.object_memory_check_accumulator < 0.5:
+            return
+        self.object_memory_check_accumulator = 0.0
+        size = self.map.tile_map.tile_size
+        for obj in sorted(self.objects.values(), key=lambda value: value.object_id):
+            if not obj.active or obj.container is not None:
+                continue
+            if int(obj.state.get("object_memory_last_spoken_day", -1)) == self.day.attempts:
+                continue
+            for memory_id in self.object_memory_refs(obj):
+                memory = self.map.object_memories.get(memory_id)
+                if (
+                    memory is None
+                    or math.dist((self.player.x, self.player.y), obj.center)
+                    > memory.radius_tiles * size
+                ):
+                    continue
+                states = obj.state.setdefault("object_memory_state", {})
+                if not isinstance(states, dict):
+                    states = {}
+                    obj.state["object_memory_state"] = states
+                state = states.setdefault(memory_id, {})
+                if not isinstance(state, dict):
+                    state = {}
+                    states[memory_id] = state
+                if int(state.get("last_roll_day", -1)) == self.day.attempts:
+                    continue
+                state["last_roll_day"] = self.day.attempts
+                times_said = max(0, int(state.get("times_said", 0)))
+                chance = memory.chance * (0.5**times_said)
+                if random.random() >= chance:
+                    continue
+                state["times_said"] = times_said + 1
+                obj.state["object_memory_last_spoken_day"] = self.day.attempts
+                self.thought_bubble_text = memory.text
+                self.thought_bubble_source = "object_memory"
+                self.thought_bubble_timer = CONDITION_THOUGHT_DISPLAY_SECONDS
+                self.log(memory.text)
+                return
 
     def update_condition_thoughts(self, dt: float) -> None:
         if (
@@ -3738,11 +5021,30 @@ class Game:
             elapsed_minutes = int(self.time_accumulator)
             if elapsed_minutes:
                 self.time_accumulator -= elapsed_minutes
-                self.day.current_time_minutes += elapsed_minutes
-                if self.advance_player_conditions(elapsed_minutes):
+                previous_minutes = self.day.current_time_minutes
+                self.day.current_time_minutes = min(
+                    self.night_cutoff_minutes,
+                    previous_minutes + elapsed_minutes,
+                )
+                advanced_minutes = self.day.current_time_minutes - previous_minutes
+                self.show_late_night_hints(
+                    previous_minutes, self.day.current_time_minutes
+                )
+                self.update_illnesses(advanced_minutes)
+                if self.advance_player_conditions(advanced_minutes):
                     return
+                if self.day.current_time_minutes >= self.night_cutoff_minutes:
+                    self.time_accumulator = 0.0
+                    self.begin_day_transition()
+                    return
+        if self.vomiting_timer_seconds > 0.0:
+            self.vomiting_timer_seconds = max(
+                0.0, self.vomiting_timer_seconds - dt
+            )
+            return
         if self.update_barrel_fill_job(dt):
             return
+
         if self.update_field_water_job(dt):
             return
         if (
@@ -3811,12 +5113,23 @@ class Game:
                 if self.player.has_bucket and not self.player.bucket_filled:
                     self.player.bucket_water_uses = self.bucket_capacity
                     self.log("Filled the wooden bucket with 5 uses of water.")
-            elif target.action == "Drink Water":
+            elif target.action in {"Drink Water", "Drink Until Full"}:
                 recovery = 25.0 if self.player.has_bucket else 5.0
                 apply_condition_effects(self.player, {"thirst": recovery})
                 self.log(
                     f"Drank from the water ({recovery:g} Thirst recovered)."
                 )
+                located = self.map.tile_map.tile_at_world(*target.point)
+                if located is not None:
+                    self.attempt_illness_exposures(
+                        self.map.tile_illness_exposures.get(located[2].kind, {})
+                    )
+                if (
+                    target.action == "Drink Until Full"
+                    and self.player.conditions["thirst"] > 0.0
+                ):
+                    self.area_job_timer = 0.0
+                    return
             elif target.action == "Till Grassland" and self.player.carrying_hoe:
                 located = self.map.tile_map.tile_at_world(*target.point)
                 if located is not None and located[2].kind is TileKind.GRASSLAND:
@@ -3982,6 +5295,53 @@ class Game:
             else:
                 step = self.day.remembered_routine[self.day.replay_index]
                 self.record_rewind_checkpoint(step.action)
+                if step.action == ROUTINE_REFERENCE_ACTION:
+                    self.day.replay_index += 1
+                    return
+                if step.action in {ROUTINE_IF_ACTION, ROUTINE_LOOP_ACTION}:
+                    condition_met = self.routine_step_condition_met(step)
+                    should_skip = (
+                        condition_met
+                        if step.action == ROUTINE_LOOP_ACTION
+                        else not condition_met
+                    )
+                    if should_skip:
+                        end = self.matching_routine_end(self.day.replay_index)
+                        self.day.replay_index = (
+                            end + 1 if end is not None else len(self.day.remembered_routine)
+                        )
+                    elif step.action == ROUTINE_LOOP_ACTION:
+                        end = self.matching_routine_end(self.day.replay_index)
+                        if end is None or not self.routine_block_has_executable_command(
+                            self.day.replay_index + 1, end
+                        ):
+                            self.day.replay_index = (
+                                end + 1
+                                if end is not None
+                                else len(self.day.remembered_routine)
+                            )
+                            self.log(
+                                "Exited repeat: none of its commands are currently executable."
+                            )
+                        else:
+                            self.day.replay_index += 1
+                    else:
+                        self.day.replay_index += 1
+                    return
+                if step.action == ROUTINE_END_ACTION:
+                    opener = self.matching_routine_opener(self.day.replay_index)
+                    if (
+                        opener is not None
+                        and self.day.remembered_routine[opener].action == ROUTINE_LOOP_ACTION
+                    ):
+                        self.day.replay_index = opener
+                    else:
+                        self.day.replay_index += 1
+                    return
+                if not self.routine_step_condition_met(step):
+                    self.day.replay_index += 1
+                    self.log(f"Skipped {step.action}: {self.routine_condition_label(step)} is false.")
+                    return
                 if (
                     step.action == "Water Crops"
                     and step.area_bounds is not None
@@ -4020,12 +5380,16 @@ class Game:
                             record=False,
                         )
                 elif (
-                    step.action == "Drink Water"
+                    step.action in {"Drink Water", "Drink Until Full"}
                     and step.target_id is None
                     and step.target_point is not None
                 ):
                     self.day.replay_index += 1
-                    if not self.queue_terrain_drink(step.target_point, record=False):
+                    if not self.queue_terrain_drink(
+                        step.target_point,
+                        record=False,
+                        until_full=step.action == "Drink Until Full",
+                    ):
                         self.visit_failed_memory(
                             step.target_point,
                             step.action,
@@ -4050,6 +5414,13 @@ class Game:
                         self.log(f"Skipped unavailable remembered job: {step.action}.")
                     else:
                         self.consume_carried_food(food, "from inventory")
+                elif step.action == "Harvest and Eat Berries":
+                    target = self.berry_routine_target(step)
+                    if target is None:
+                        self.day.replay_index += 1
+                        self.log("Skipped unavailable remembered job: Harvest and Eat Berries.")
+                    else:
+                        self.queue_job(target.object_id, step.action, record=False)
                 elif step.nearest_to_player and step.action in NEAREST_AREA_COMMANDS:
                     self.day.replay_index += 1
                     self.queue_nearest_area_command(
@@ -4116,7 +5487,11 @@ class Game:
             required_duration = object_job_duration_seconds(
                 self.pending_job.action, target, self.player.has_basket
             )
-            if self.pending_job.action in {"Harvest Berries", "Harvest Wheat"}:
+            if self.pending_job.action in {
+                "Harvest Berries",
+                "Harvest and Eat Berries",
+                "Harvest Wheat",
+            }:
                 required_duration /= self.skill_speed_multiplier("harvesting")
             if self.job_timer >= required_duration:
                 job = self.pending_job
@@ -4124,6 +5499,20 @@ class Game:
                 self.complete_job(job)
                 if self.day.mode is Mode.REPLAY and job.advances_replay:
                     self.day.replay_index += 1
+
+    def show_late_night_hints(
+        self, previous_minutes: int, current_minutes: int
+    ) -> None:
+        for hint in self.night_hints:
+            if (
+                previous_minutes < hint.minute <= current_minutes
+                and hint.minute not in self.shown_night_hint_minutes
+            ):
+                self.shown_night_hint_minutes.add(hint.minute)
+                self.log(hint.text)
+                self.thought_bubble_text = hint.text
+                self.thought_bubble_source = "night_hint"
+                self.thought_bubble_timer = CONDITION_THOUGHT_DISPLAY_SECONDS
 
     def advance_player_conditions(self, elapsed_minutes: int) -> bool:
         hourly_change = float(elapsed_minutes) / 60.0
@@ -4147,6 +5536,73 @@ class Game:
             self.begin_day_transition()
             return True
         return False
+
+    def attempt_illness_exposures(self, exposures: dict[str, float]) -> None:
+        """Roll independent, hidden exposures for every illness on a source."""
+        for illness_id, chance in exposures.items():
+            if chance <= 0.0 or random.random() >= chance:
+                continue
+            definition = self.illness_types[illness_id]
+            onset = self.day.current_time_minutes + random.randint(
+                *definition.incubation_minutes
+            )
+            current = self.active_illnesses.get(illness_id)
+            if current is None:
+                self.active_illnesses[illness_id] = ActiveIllness(
+                    illness_id, definition.initial_value, onset
+                )
+            else:
+                current.value = max(current.value, definition.initial_value)
+                current.onset_minute = min(current.onset_minute, onset)
+
+    def show_illness_thought(self, text: str) -> None:
+        self.thought_bubble_text = text
+        self.thought_bubble_source = "illness"
+        self.thought_bubble_timer = CONDITION_THOUGHT_DISPLAY_SECONDS
+        self.log(text)
+
+    def update_illnesses(self, elapsed_minutes: int) -> None:
+        first_minute = self.day.current_time_minutes - elapsed_minutes + 1
+        for minute in range(first_minute, self.day.current_time_minutes + 1):
+            for illness_id, illness in list(self.active_illnesses.items()):
+                definition = self.illness_types[illness_id]
+                if not illness.revealed:
+                    if minute < illness.onset_minute:
+                        continue
+                    illness.revealed = True
+                    illness.next_vomit_check_minute = minute + random.randint(
+                        *definition.effect_grace_minutes
+                    )
+                    self.show_illness_thought(definition.onset_thought)
+                    continue
+                if minute < (illness.next_vomit_check_minute or minute):
+                    continue
+                if random.random() * 100.0 >= illness.value:
+                    continue
+                apply_condition_effects(
+                    self.player, definition.effect_condition_effects
+                )
+                self.vomiting_timer_seconds = max(
+                    self.vomiting_timer_seconds, VOMITING_DURATION_SECONDS
+                )
+                illness.value *= 1.0 - definition.effect_clear_rate
+                self.show_illness_thought(definition.effect_thought)
+                self.log(
+                    f"Vomiting reduced {definition.name} to {illness.value:g}%."
+                )
+                if illness.value <= definition.recovery_threshold:
+                    del self.active_illnesses[illness_id]
+
+    def player_looks_ill(self) -> bool:
+        return any(illness.revealed for illness in self.active_illnesses.values())
+
+    def visible_illness_factors(self) -> list[tuple[IllnessType, float]]:
+        """Return each revealed illness separately; incubation remains unknowable."""
+        return [
+            (self.illness_types[illness_id], illness.value)
+            for illness_id, illness in self.active_illnesses.items()
+            if illness.revealed
+        ]
 
     def skill_config(self, skill_id: str) -> dict[str, object]:
         character = self.map.characters.get(self.player.character_id)
@@ -4187,14 +5643,17 @@ class Game:
             loot = self.grant_interaction_loot(obj, action)
             obj.active = False
             self.log(f"Gathered {', '.join(loot)}.")
-        elif action == "Harvest Berries":
+        elif action in {"Harvest Berries", "Harvest and Eat Berries"}:
             if not bool(obj.state.get("has_berries", True)):
                 return
             self.grant_interaction_loot(obj, action)
-            self.create_interaction_objects(obj, action)
+            berries = self.create_interaction_objects(obj, action)
             obj.state["has_berries"] = False
             self.award_skill_experience("harvesting")
-            self.log("Harvested berries.")
+            if action == "Harvest and Eat Berries" and berries:
+                self.consume_carried_food(berries[0], "straight from the bush")
+            else:
+                self.log("Harvested berries.")
         elif action == "Pull Berry Bush":
             had_berries = bool(obj.state.get("has_berries", True))
             self.grant_interaction_loot(obj, action)
@@ -4273,6 +5732,11 @@ class Game:
                 return
             data["water_uses"] = int(data["water_uses"]) - 1
             apply_condition_effects(self.player, {"thirst": 25})
+            self.attempt_illness_exposures(
+                self.map.object_types[obj.type_id]
+                .form_definition(obj.form or None, obj.variant)
+                .illness_exposures
+            )
             self.sync_barrel_sprite_state(data)
             obj.state = data
             self.log("Drank from the barrel (25 Thirst recovered).")
@@ -4366,6 +5830,10 @@ class Game:
             self.quests.record_event("homemade_food_prepared")
             self.log("Prepared a terrible bowl of porridge.")
         elif action in {"Eat Porridge", "Eat Berries"}:
+            if "edible" in obj.traits:
+                self.consume_carried_food(obj, "from the table")
+                rebuild_tile_map(self.map)
+                return
             definition = self.interaction_definition(obj, action)
             consumed_type = str(
                 definition.get("consumes", {}).get("type", "")
@@ -4402,6 +5870,11 @@ class Game:
             else {"hunger": float(food.nutrition)}
         )
         lethal = apply_condition_effects(self.player, recovery)
+        self.attempt_illness_exposures(
+            self.map.object_types[food.type_id]
+            .form_definition(food.form or None, food.variant)
+            .illness_exposures
+        )
         self.quests.record_event("food_eaten")
         self.quests.record_event(
             "health_recovered",
@@ -4409,7 +5882,8 @@ class Game:
         )
         food.active = False
         food.container = None
-        self.player.carried_objects.remove(food)
+        if food in self.player.carried_objects:
+            self.player.carried_objects.remove(food)
         if food.type_id == "porridge":
             self.quests.record_event("homemade_food_eaten")
         effects = ", ".join(
@@ -4574,6 +6048,9 @@ class Game:
     ):
         definition = self.map.object_types[obj.type_id]
         return definition.form_definition(form_id or obj.form).persistence.get(policy_id)
+
+    def advance_simple_object_persistence(self) -> None:
+        """Compatibility hook: persistence no longer decays between attempts."""
 
     def object_persistence_details(self, obj: WorldObject) -> list[str]:
         if obj.kind is ObjectKind.TREE:
@@ -4884,63 +6361,15 @@ class Game:
         if self.day_transition_phase is not None:
             return
         if len(self.day_position_history) > 1:
-            route = list(self.day_position_history)
-            bedtime_state = self.capture_transition_state()
-            bedtime_objects = self.object_persistence_signatures()
-            bedtime_tiles = self.tile_persistence_signatures()
-            previous_dawn_objects = self.dawn_object_signatures
-            previous_dawn_tiles = self.dawn_tile_signatures
-            if not self.finish_day():
-                return
-            next_dawn_objects = self.object_persistence_signatures()
-            next_dawn_tiles = self.tile_persistence_signatures()
-            self.rewind_flashing_objects = {
-                object_id
-                for object_id, bedtime in bedtime_objects.items()
-                if previous_dawn_objects.get(object_id) != bedtime
-                and next_dawn_objects.get(object_id) == bedtime
-                and self.objects.get(object_id) is not None
-                and self.objects[object_id].active
-            }
-            self.rewind_flashing_tiles = {
-                position
-                for position, bedtime in bedtime_tiles.items()
-                if previous_dawn_tiles.get(position) != bedtime
-                and next_dawn_tiles.get(position) == bedtime
-            }
-            self.rewind_persistent_objects = {
-                object_id: copy.deepcopy(self.objects[object_id])
-                for object_id in self.rewind_flashing_objects
-            }
-            self.rewind_persistent_tiles = {}
-            for position in self.rewind_flashing_tiles:
-                tile = self.map.tile_map.tile_at(*position)
-                if tile is not None:
-                    self.rewind_persistent_tiles[position] = (
-                        tile.kind,
-                        tuple(tile.properties),
-                        copy.deepcopy(self.map.tile_states.get(position)),
-                    )
+            # Keep the bedtime state so the rewind can begin immediately. The
+            # comparatively expensive save/reload happens behind the fade-out.
             self.dawn_transition_state = self.capture_transition_state()
-            self.restore_transition_state(bedtime_state)
-            remembered_count = (
-                len(self.rewind_flashing_objects)
-                + len(self.rewind_flashing_tiles)
-            )
-            if remembered_count:
-                self.log(
-                    f"Memory held {remembered_count} changed "
-                    f"{'thing' if remembered_count == 1 else 'things'} through dawn."
-                )
-            self.day_position_history = route
-            self.player.x, self.player.y = route[-1]
             self.day_transition_prepared = True
-            self.day_transition_phase = "rewind"
             self.rewind_cursor = float(len(self.day_position_history) - 1)
-            self.rewind_speed = REWIND_START_SAMPLES_PER_SECOND
+            self.rewind_speed = self.time_speed
+            self.rewind_start_time_minutes = self.day.current_time_minutes
             self.rewind_checkpoint_index = len(self.rewind_checkpoints) - 1
-        else:
-            self.day_transition_phase = "fade_out"
+        self.day_transition_phase = "night_bumper"
         self.day_transition_progress = 0.0
         self.simulation_paused = True
 
@@ -4984,7 +6413,7 @@ class Game:
         self.sync_storage_memory(storage)
 
     def advance_storage_memories(self) -> None:
-        randomizer = random.Random(44_701 + self.day.number)
+        randomizer = random.Random(44_701 + self.day.attempts)
         for storage_id, tools in self.storage_memories.items():
             storage = self.objects[storage_id]
             policy = self.object_persistence_policy(storage, "stored_tools")
@@ -5007,9 +6436,6 @@ class Game:
                             progress["persistent"] = True
                         else:
                             progress["present"] = False
-                elif int(progress["store_count"]) > 0:
-                    if randomizer.random() < policy.decay_chance:
-                        progress["store_count"] = int(progress["store_count"]) - 1
             self.sync_storage_memory(storage)
             if storage.persistent_state is not None:
                 storage.persistent_state.state = storage.state
@@ -5025,8 +6451,7 @@ class Game:
         self.player.carrying_axe = False
 
     def advance_barrel_memories(self) -> None:
-        randomizer = random.Random(83_119 + self.day.number)
-        seen_memories: set[str] = set()
+        randomizer = random.Random(83_119 + self.day.attempts)
         for barrel in (obj for obj in self.objects.values() if obj.type_id == "barrel"):
             data = self.barrel_state(barrel)
             memory_id = data.get("build_memory_id")
@@ -5035,8 +6460,6 @@ class Game:
                 if memory_id is not None
                 else None
             )
-            if memory is not None:
-                seen_memories.add(memory.memory_id)
             if not barrel.persistent:
                 policy = self.object_persistence_policy(barrel, "object")
                 if policy is None:
@@ -5050,11 +6473,6 @@ class Game:
                 if memory is not None:
                     memory.persistence_modifier = modifier
                 if not barrel.active or not data["built_today"]:
-                    if int(data["build_count"]) > 0 and randomizer.random() < policy.decay_chance:
-                        data["build_count"] = int(data["build_count"]) - 1
-                        barrel.state = data
-                        if memory is not None:
-                            memory.build_count = int(data["build_count"])
                     continue
                 data["build_count"] = int(data["build_count"]) + 1
                 if memory is not None:
@@ -5120,23 +6538,9 @@ class Game:
             if memory is not None:
                 memory.persistent = True
                 memory.state = dict(persistent_data)
-        for memory_id, memory in self.build_memories.items():
-            if (
-                memory_id not in seen_memories
-                and not memory.persistent
-                and memory.build_count > 0
-                and (
-                    (policy := self.map.object_types[memory.object_type]
-                     .form_definition()
-                     .persistence.get("object"))
-                    is not None
-                )
-                and randomizer.random() < policy.decay_chance
-            ):
-                memory.build_count -= 1
 
     def advance_stump_memories(self) -> None:
-        randomizer = random.Random(97_331 + self.day.number)
+        randomizer = random.Random(97_331 + self.day.attempts)
         for tree in (obj for obj in self.objects.values() if obj.kind is ObjectKind.TREE):
             state = tree_state_data(tree.state)
             count = int(state["stump_memory_count"])
@@ -5180,8 +6584,6 @@ class Game:
                         tree.persistent_state.state = encode_tree_state(baseline)
                         tree.persistent_state.form = self.map.object_types["tree"].default_form
                 continue
-            if count > 0 and randomizer.random() < policy.decay_chance:
-                state["stump_memory_count"] = count - 1
             tree.state = encode_tree_state(state)
             if tree.persistent_state is not None:
                 baseline = tree_state_data(tree.persistent_state.state)
@@ -5190,6 +6592,19 @@ class Game:
 
     def update_day_transition(self, dt: float) -> None:
         if self.day_transition_phase == "planner":
+            return
+        if self.day_transition_phase == "night_bumper":
+            self.day_transition_progress = min(
+                1.0,
+                self.day_transition_progress + dt / NIGHT_BUMPER_DURATION_SECONDS,
+            )
+            if self.day_transition_progress >= 1.0:
+                if len(self.day_position_history) > 1:
+                    self.day_transition_phase = "rewind"
+                    self.day_transition_progress = 0.0
+                else:
+                    self.day_transition_phase = "fade_out"
+                    self.day_transition_progress = 1.0
             return
         if self.day_transition_phase == "rewind":
             self.update_day_rewind(dt)
@@ -5205,12 +6620,11 @@ class Game:
         if self.day_transition_progress < 1.0:
             return
         if self.day_transition_phase == "fade_out":
-            if self.day_transition_prepared or self.finish_day():
-                if (
-                    self.day_transition_prepared
-                    and self.dawn_transition_state is not None
-                ):
-                    self.restore_transition_state(self.dawn_transition_state)
+            if self.day_transition_prepared and self.dawn_transition_state is not None:
+                # Checkpoint playback temporarily restores earlier command
+                # states; persist the actual bedtime state, not a rewound one.
+                self.restore_transition_state(self.dawn_transition_state)
+            if self.finish_day():
                 self.day_transition_prepared = False
                 self.dawn_transition_state = None
                 self.rewind_checkpoints.clear()
@@ -5225,22 +6639,27 @@ class Game:
             self.day_transition_progress = 0.0
 
     def update_day_rewind(self, dt: float) -> None:
-        """Run the recorded route backwards, accelerating toward dawn."""
-        self.rewind_speed += (
-            REWIND_ACCELERATION_SAMPLES_PER_SECOND_SQUARED * dt
+        """Play the recorded movement route backward at the selected speed."""
+        self.rewind_speed = self.time_speed
+        samples_per_second = self.time_speed / FIXED_SIMULATION_TICK_SECONDS
+        self.rewind_cursor = max(
+            0.0, self.rewind_cursor - samples_per_second * dt
         )
-        self.rewind_cursor = max(0.0, self.rewind_cursor - self.rewind_speed * dt)
+        snapshot_to_restore: dict[str, object] | None = None
         while (
             self.rewind_checkpoint_index >= 0
             and self.rewind_cursor
             <= self.rewind_checkpoints[self.rewind_checkpoint_index][0]
         ):
-            _sample, action, snapshot = self.rewind_checkpoints[
+            _sample, _action, snapshot_to_restore = self.rewind_checkpoints[
                 self.rewind_checkpoint_index
             ]
-            self.restore_rewind_checkpoint(snapshot)
-            self.log(f"Rewound: {action}.")
             self.rewind_checkpoint_index -= 1
+        # At high playback speeds a frame can cross several commands. Only the
+        # oldest crossed snapshot can be visible, so avoid deep-copying the
+        # whole world for every intermediate checkpoint.
+        if snapshot_to_restore is not None:
+            self.restore_rewind_checkpoint(snapshot_to_restore)
         lower = int(self.rewind_cursor)
         upper = min(lower + 1, len(self.day_position_history) - 1)
         fraction = self.rewind_cursor - lower
@@ -5252,7 +6671,9 @@ class Game:
         self.day_transition_progress = 1.0 - self.rewind_cursor / total
         if self.rewind_cursor <= 0.0:
             self.day_transition_phase = "fade_out"
-            self.day_transition_progress = 0.0
+            # The next rendered frame must be fully masked. Otherwise restoring
+            # the bedtime snapshot can expose a one-frame jump back to bed.
+            self.day_transition_progress = 1.0
 
     def finish_day(self) -> bool:
         quest_state_before_dawn = self.quests.state_data()
@@ -5271,7 +6692,7 @@ class Game:
         try:
             advance_level_tile_states(
                 self.map.tile_states,
-                day_number=self.day.number,
+                day_number=self.day.attempts,
                 reverted_till_progress_range=self.map.reverted_till_progress_range,
                 persistence_modifier_range=self.map.tile_persistence_modifier_range,
             )
@@ -5291,7 +6712,7 @@ class Game:
             )
             next_day_map = load_map(
                 persistence_path=self.persistence_path,
-                day_number=self.day.number + 1,
+                day_number=self.day.attempts + 1,
                 reset_for_morning=True,
             )
             next_character = next_day_map.characters.get(self.player.character_id)
@@ -5336,18 +6757,22 @@ class Game:
             self.player.skills = character.skills
             self.player.last_sleep_id = character.last_sleep_id
             self.player.used_nap_windows = set(character.used_nap_windows)
-        self.day.number += 1
+        self.day.attempts += 1
         self.day.mode = Mode.MORNING
         self.day.today_routine.clear()
+        self.day.command_history.clear()
         self.day.replay_index = 0
         self.day.current_time_minutes = START_OF_DAY_MINUTES
+        self.shown_night_hint_minutes.clear()
         self.time_accumulator = 0.0
+        self.active_illnesses.clear()
+        self.vomiting_timer_seconds = 0.0
         self.menu_index = 0
         self.player.inventory.clear()
         self.player.x, self.player.y = self.player_spawn()
         self.day_position_history = [(self.player.x, self.player.y)]
         self.rewind_cursor = 0.0
-        self.rewind_speed = REWIND_START_SAMPLES_PER_SECOND
+        self.rewind_speed = self.time_speed
         self.navigation_path = []
         self.preview_path = []
         self.walk_target = None
@@ -5364,13 +6789,16 @@ class Game:
         self.active_command = None
         self.selected_id = None
         self.selected_tile = None
-        self.log(f"Day {self.day.number}. Yesterday's completed jobs are remembered.")
+        self.log(
+            f"Day {self.day.number}, Attempt {self.day.attempts}. "
+            "The previous attempt's completed jobs are remembered."
+        )
         self.dawn_object_signatures = self.object_persistence_signatures()
         self.dawn_tile_signatures = self.tile_persistence_signatures()
         return True
 
     def object_persistence_signatures(self) -> dict[int, tuple[object, ...]]:
-        persistence_only_fields = {
+        ignored_state_fields = {
             "build_count",
             "built_today",
             "persistence_modifier",
@@ -5391,7 +6819,7 @@ class Game:
                     {
                         key: value
                         for key, value in obj.state.items()
-                        if key not in persistence_only_fields
+                        if key not in ignored_state_fields
                     },
                     sort_keys=True,
                     default=str,
@@ -5402,15 +6830,16 @@ class Game:
 
     def tile_persistence_signatures(
         self,
-    ) -> dict[tuple[int, int], tuple[object, ...]]:
-        signatures: dict[tuple[int, int], tuple[object, ...]] = {}
-        for row in range(self.map.tile_map.rows):
-            for column in range(self.map.tile_map.columns):
-                tile = self.map.tile_map.tile_at(column, row)
-                signatures[(column, row)] = (
-                    tile.kind if tile is not None else None,
-                )
-        return signatures
+    ) -> dict[tuple[int, int], TileKind | None]:
+        return {
+            (column, row): (
+                tile.kind
+                if (tile := self.map.tile_map.tile_at(column, row)) is not None
+                else None
+            )
+            for row in range(self.map.tile_map.rows)
+            for column in range(self.map.tile_map.columns)
+        }
 
     def unlock(self, name: str) -> None:
         if name not in self.player.achievements:
@@ -5424,9 +6853,22 @@ class Game:
 
     def draw(self) -> None:
         if self.adjusting_memory:
-            preview_position = self.command_editor_preview_position()
-            self._editor_camera_restore = (self.camera.x, self.camera.y)
-            self.camera.center_on(preview_position, (self.map.width, self.map.height))
+            self._editor_camera_restore = (
+                self.camera.x,
+                self.camera.y,
+                self.camera.zoom,
+            )
+            if self.memory_editor_map_camera is None:
+                self.camera.center_on(
+                    self.command_editor_preview_position(),
+                    (self.map.width, self.map.height),
+                )
+            else:
+                camera_x, camera_y, zoom = self.memory_editor_map_camera
+                self.camera.x = camera_x
+                self.camera.y = camera_y
+                self.camera.zoom = zoom * self.camera.world_scale
+                self.camera.clamp((self.map.width, self.map.height))
         self.screen.fill((76, 104, 74))
         self.screen.set_clip(MAP_VIEWPORT)
         self.draw_tiles()
@@ -5453,6 +6895,9 @@ class Game:
     def draw_day_transition(self) -> None:
         if self.day_transition_phase is None:
             return
+        if self.day_transition_phase == "night_bumper":
+            self.draw_night_bumper()
+            return
         if self.day_transition_phase == "rewind":
             self.draw_rewind_vcr_effect()
             overlay = pygame.Surface(MAP_VIEWPORT.size, pygame.SRCALPHA)
@@ -5460,7 +6905,7 @@ class Game:
             overlay.fill((42, 62, 96, pulse))
             self.screen.blit(overlay, MAP_VIEWPORT.topleft)
             label = self.title_font.render(
-                f"REWIND  {self.rewind_speed:.0f}x", True, (225, 235, 255)
+                f"REWIND  {self.time_speed:g}x", True, (225, 235, 255)
             )
             self.screen.blit(
                 label,
@@ -5486,6 +6931,13 @@ class Game:
         self.screen.blit(overlay, MAP_VIEWPORT.topleft)
         if self.day_transition_phase == "fade_in":
             self.draw_wake_status(alpha)
+
+    def draw_night_bumper(self) -> None:
+        self.screen.fill((5, 7, 12))
+        rendered = self.title_font.render(
+            NIGHT_BUMPER_TEXT, True, (225, 222, 210)
+        )
+        self.screen.blit(rendered, rendered.get_rect(center=self.screen.get_rect().center))
 
     def draw_rewind_vcr_effect(self) -> None:
         """Distort the map like a worn tape without touching simulation state."""
@@ -5574,6 +7026,18 @@ class Game:
             self.screen.blit(surface, (x, y))
             x += surface.get_width()
 
+    def displayed_time_minutes(self) -> int:
+        """Return the clock value represented by the current visual frame."""
+        if self.day_transition_phase != "rewind":
+            return self.day.current_time_minutes
+        total = max(1, len(self.day_position_history) - 1)
+        route_fraction = max(0.0, min(1.0, self.rewind_cursor / total))
+        return round(
+            START_OF_DAY_MINUTES
+            + (self.rewind_start_time_minutes - START_OF_DAY_MINUTES)
+            * route_fraction
+        )
+
     def draw_top_bar(self) -> None:
         panel = pygame.Rect(0, 0, WIDTH, TOP_BAR_HEIGHT)
         pygame.draw.rect(self.screen, (34, 40, 45), panel)
@@ -5583,8 +7047,9 @@ class Game:
         pygame.draw.rect(
             self.screen, (34, 40, 45), time_background, border_radius=3
         )
+        displayed_minutes = self.displayed_time_minutes()
         time_surface = self.small_font.render(
-            f"Day {self.day.number}  {format_clock_time(self.day.current_time_minutes)}",
+            f"Day {self.day.number}  {format_clock_time(displayed_minutes)}",
             True,
             (238, 238, 228),
         )
@@ -5597,7 +7062,7 @@ class Game:
         track_width = time_area.right - track_x - controls_width - 12
         track_y = 5
         pygame.draw.rect(self.screen, (84, 93, 98), (track_x, track_y, track_width, 18))
-        progress = day_progress_ratio(self.day.current_time_minutes)
+        progress = day_progress_ratio(displayed_minutes)
         sun_x = sun_track_position(progress, track_x, track_width)
         filled_width = sun_x - track_x
         pygame.draw.rect(self.screen, (234, 180, 84), (track_x, track_y, filled_width, 18))
@@ -5732,18 +7197,10 @@ class Game:
                     self.day_transition_phase == "rewind"
                     and (column, row) in self.rewind_flashing_tiles
                 ):
-                    flash = (
-                        math.sin(pygame.time.get_ticks() / 95.0) + 1.0
-                    ) / 2.0
+                    flash = (math.sin(pygame.time.get_ticks() / 95.0) + 1.0) / 2.0
                     glow = pygame.Surface(rect.size, pygame.SRCALPHA)
                     glow.fill((255, 244, 150, round(45 + 125 * flash)))
                     self.screen.blit(glow, rect.topleft)
-                    pygame.draw.rect(
-                        self.screen,
-                        (255, 248, 180),
-                        rect,
-                        max(1, round(2 * self.camera.effective_zoom)),
-                    )
     def draw_boundaries(self) -> None:
         """Draw edge sprites, retaining geometry placeholders for missing assets."""
         authored: dict[tuple[int, int, str], BoundaryObject] = {
@@ -5844,18 +7301,10 @@ class Game:
                 self.day_transition_phase == "rewind"
                 and obj.object_id in self.rewind_flashing_objects
             ):
-                flash = (
-                    math.sin(pygame.time.get_ticks() / 95.0) + 1.0
-                ) / 2.0
+                flash = (math.sin(pygame.time.get_ticks() / 95.0) + 1.0) / 2.0
                 show_border = True
-                border_color = (
-                    255,
-                    round(205 + 45 * flash),
-                    round(90 + 90 * flash),
-                )
-                border = max(
-                    border, max(2, round((3 + 3 * flash) * self.camera.zoom))
-                )
+                border_color = (255, round(205 + 45 * flash), round(90 + 90 * flash))
+                border = max(border, max(2, round((3 + 3 * flash) * self.camera.zoom)))
             if (
                 obj.kind is ObjectKind.WORKBENCH
                 and not selected
@@ -6015,8 +7464,14 @@ class Game:
             self.draw_selection_bounds(bounds, (83, 165, 220))
         if self.command_drag_start is None or self.command_drag_current is None:
             return
+        selection_start = (
+            self.command_drag_current
+            if self.target_selection_mode == "target"
+            and self.active_command not in {"Fill Barrel", "Water Crops Source"}
+            else self.command_drag_start
+        )
         bounds = tile_aligned_area_bounds(
-            self.command_drag_start, self.command_drag_current, self.map.tile_map.tile_size
+            selection_start, self.command_drag_current, self.map.tile_map.tile_size
         )
         color = (
             (83, 165, 220)
@@ -6044,12 +7499,31 @@ class Game:
         self.screen.blit(overlay, rect.topleft)
         pygame.draw.rect(self.screen, color, rect, 2)
 
-    def draw_path(self) -> None:
+    def visible_path_world_points(self) -> list[tuple[float, float]]:
+        """Return the path represented by the current frame."""
+        player_position = (self.player.x, self.player.y)
+        if self.day_transition_phase == "rewind":
+            lower = min(
+                int(self.rewind_cursor), len(self.day_position_history) - 1
+            )
+            earliest = max(0, lower - 24)
+            candidates = [
+                player_position,
+                *reversed(self.day_position_history[earliest : lower + 1]),
+            ]
+            points: list[tuple[float, float]] = []
+            for point in candidates:
+                if not points or point != points[-1]:
+                    points.append(point)
+            return points
         route = self.navigation_path or self.preview_path
-        if not route:
+        return [player_position, *route] if route else []
+
+    def draw_path(self) -> None:
+        world_points = self.visible_path_world_points()
+        if len(world_points) < 2:
             return
-        points = [self.camera.world_to_screen((self.player.x, self.player.y))]
-        points.extend(self.camera.world_to_screen((x, y)) for x, y in route)
+        points = [self.camera.world_to_screen(point) for point in world_points]
         for index in range(1, len(points)):
             pygame.draw.line(
                 self.screen,
@@ -6082,7 +7556,13 @@ class Game:
                 max(2, outline),
             )
         pygame.draw.circle(self.screen, (255, 220, 120), (px, py), radius + outline)
-        pygame.draw.circle(self.screen, (222, 214, 187), (px, py), radius)
+        visible_illnesses = self.visible_illness_factors()
+        body_color = (
+            max(visible_illnesses, key=lambda item: item[1])[0].tint_color
+            if visible_illnesses
+            else (222, 214, 187)
+        )
+        pygame.draw.circle(self.screen, body_color, (px, py), radius)
         pygame.draw.circle(self.screen, (35, 35, 35), (px, py), radius, outline)
         visual_zoom = self.world_scale * self.camera.effective_zoom
         eye_offset_x = round(4 * visual_zoom)
@@ -6098,7 +7578,11 @@ class Game:
         )
         pygame.draw.arc(self.screen, (35, 35, 35), mouth_rect, 0, math.pi, outline)
     def draw_thought_bubble(self) -> None:
-        bubble_text = self.work_thought_text() or self.thought_bubble_text
+        bubble_text = (
+            self.thought_bubble_text
+            if self.thought_bubble_source == "illness"
+            else self.work_thought_text() or self.thought_bubble_text
+        )
         if bubble_text is None:
             return
         px, py = self.camera.world_to_screen((self.player.x, self.player.y))
@@ -6171,22 +7655,41 @@ class Game:
                     condition_color(value),
                 )
         self.text(
-            f"Movement: {movement_speed_multiplier(self.player) * 100:.1f}%",
+            f"Day: {self.day.number}",
             (right_column_x, 44),
             self.small_font,
         )
         self.text(
-            f"Task Speed: {task_speed_multiplier(self.player) * 100:.1f}%",
+            f"Attempts: {self.day.attempts}",
             (right_column_x, 72),
+            self.small_font,
+        )
+        self.text(
+            f"Movement: {movement_speed_multiplier(self.player) * 100:.1f}%",
+            (right_column_x, 100),
+            self.small_font,
+        )
+        self.text(
+            f"Task Speed: {task_speed_multiplier(self.player) * 100:.1f}%",
+            (right_column_x, 128),
             self.small_font,
         )
         rate = healing_rate(self.player)
         self.text(
             f"Healing: {rate:+.2f}/hr",
-            (right_column_x, 100),
+            (right_column_x, 156),
             self.small_font,
             (112, 198, 112) if rate > 0 else (235, 88, 88) if rate < 0 else (210, 214, 202),
         )
+        for index, (definition, illness_value) in enumerate(
+            self.visible_illness_factors()
+        ):
+            self.text(
+                f"{definition.name}: {illness_value:.0f}%",
+                (right_column_x, 184 + index * 24),
+                self.small_font,
+                definition.tint_color,
+            )
         self.text("Skills", (content_x, 174), self.small_font, (172, 176, 182))
         for index, (skill_id, skill) in enumerate(
             sorted(self.player.skills.items())
@@ -6349,7 +7852,6 @@ class Game:
         self.player_info_tab_buttons = [
             (layout.inventory_tab, InventoryPage.INVENTORY),
             (layout.quests_tab, InventoryPage.QUESTS),
-            (layout.macros_tab, InventoryPage.MACROS),
         ]
         for rect, page in self.player_info_tab_buttons:
             selected = page is self.inventory_page
@@ -6366,28 +7868,60 @@ class Game:
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
 
         self.macro_buttons.clear()
+        self.macro_dropdown_buttons.clear()
         if self.inventory_page is InventoryPage.MACROS:
             content_x = layout.inventory.x + 12
             content_y = layout.inventory.y + 42
             status = "Recording" if self.macro_recording else "Ready"
             name = self.memory_file_name or "Unnamed set"
-            self.text(f"Set: {name}", (content_x, content_y), self.small_font)
+            self.text("Current Routine", (content_x, content_y), self.small_font, (172, 176, 182))
+            dropdown = pygame.Rect(
+                content_x, content_y + 22, layout.inventory.width - 24, 32
+            )
+            pygame.draw.rect(self.screen, (218, 213, 190), dropdown)
+            pygame.draw.rect(self.screen, (92, 95, 101), dropdown, 2)
+            self.text(name, (dropdown.x + 9, dropdown.y + 8), self.small_font, (35, 35, 35))
+            arrow = self.small_font.render("▲" if self.macro_dropdown_open else "▼", True, (35, 35, 35))
+            self.screen.blit(arrow, arrow.get_rect(center=(dropdown.right - 17, dropdown.centery)))
+            self.macro_buttons.append((dropdown, "Macro Dropdown"))
             self.text(
                 f"Status: {status}",
-                (content_x, content_y + 24),
+                (content_x, content_y + 62),
                 self.small_font,
                 (235, 205, 120) if self.macro_recording else (172, 176, 182),
             )
-            actions = ["Stop", "Edit"] if self.macro_recording else ["Start", "Edit"]
+            actions = ["Play", "Stop", "Edit"] if self.macro_recording else ["Play", "Record", "Edit"]
             for index, action in enumerate(actions):
                 rect = pygame.Rect(
-                    content_x, content_y + 58 + index * 38, layout.inventory.width - 24, 32
+                    content_x, content_y + 88 + index * 38, layout.inventory.width - 24, 32
                 )
                 pygame.draw.rect(self.screen, (174, 169, 145), rect)
                 pygame.draw.rect(self.screen, (35, 35, 35), rect, 2)
                 rendered = self.small_font.render(action, True, (25, 25, 25))
                 self.screen.blit(rendered, rendered.get_rect(center=rect.center))
                 self.macro_buttons.append((rect, action))
+            if self.macro_dropdown_open:
+                entries = [("__new__", 0.0), *sorted(
+                    self.available_command_sets(), key=lambda item: item[0].lower()
+                )]
+                for index, (macro_name, _modified) in enumerate(entries):
+                    option = pygame.Rect(
+                        dropdown.x,
+                        dropdown.bottom + index * 30,
+                        dropdown.width,
+                        30,
+                    )
+                    if option.bottom > layout.inventory.bottom - 8:
+                        break
+                    pygame.draw.rect(self.screen, (234, 229, 207), option)
+                    pygame.draw.rect(self.screen, (92, 95, 101), option, 1)
+                    self.text(
+                        "New…" if macro_name == "__new__" else macro_name,
+                        (option.x + 9, option.y + 7),
+                        self.small_font,
+                        (35, 35, 35),
+                    )
+                    self.macro_dropdown_buttons.append((option, macro_name))
             return
 
         if self.inventory_page is InventoryPage.QUESTS:
@@ -6462,7 +7996,10 @@ class Game:
         pygame.draw.rect(self.screen, (25, 28, 31), right_panel)
         pygame.draw.rect(self.screen, (92, 95, 101), sidebar, 2)
         pygame.draw.rect(self.screen, (92, 95, 101), right_panel, 2)
-        self.draw_player_dock()
+        if self.routine_moves_expanded:
+            self.draw_routine_moves_dock()
+        else:
+            self.draw_player_dock()
         self.draw_selection_details(LEFT_SELECTION_RECT)
         pygame.draw.rect(self.screen, (92, 95, 101), LEFT_SELECTION_RECT, 2)
         self.text(
@@ -6472,26 +8009,44 @@ class Game:
         )
 
         self.text(
-            "Macros",
+            "Routines",
             (LEFT_COMMAND_RECT.x + 12, LEFT_COMMAND_RECT.y + 42),
             self.small_font,
             (172, 176, 182),
         )
         self.macro_command_buttons.clear()
+        current_name = self.memory_file_name or "Select routine…"
+        dropdown = pygame.Rect(
+            LEFT_COMMAND_RECT.x + 12,
+            LEFT_COMMAND_RECT.y + 60,
+            LEFT_COMMAND_RECT.width - 142,
+            30,
+        )
+        play = pygame.Rect(dropdown.right + 8, dropdown.y, 110, 30)
+        pygame.draw.rect(self.screen, (218, 213, 190), dropdown)
+        pygame.draw.rect(self.screen, (92, 95, 101), dropdown, 2)
+        self.text(current_name, (dropdown.x + 8, dropdown.y + 7), self.small_font, (35, 35, 35))
+        arrow = self.small_font.render("▲" if self.macro_dropdown_open else "▼", True, (35, 35, 35))
+        self.screen.blit(arrow, arrow.get_rect(center=(dropdown.right - 16, dropdown.centery)))
+        pygame.draw.rect(self.screen, (174, 169, 145), play)
+        pygame.draw.rect(self.screen, (35, 35, 35), play, 1)
+        rendered = self.small_font.render("Play", True, (25, 25, 25))
+        self.screen.blit(rendered, rendered.get_rect(center=play.center))
+        self.macro_command_buttons.extend(((dropdown, "Macro Dropdown"), (play, "Play")))
         macro_gap = 6
         macro_button_width = (
             LEFT_COMMAND_RECT.width - 24 - macro_gap * 2
         ) // 3
-        for index, action in enumerate(("Start", "Stop", "Edit")):
+        for index, action in enumerate(("Record", "Stop", "Edit")):
             rect = pygame.Rect(
                 LEFT_COMMAND_RECT.x + 12 + index * (macro_button_width + macro_gap),
-                LEFT_COMMAND_RECT.y + 62,
+                LEFT_COMMAND_RECT.y + 98,
                 macro_button_width,
                 28,
             )
             enabled = (
                 action == "Edit"
-                or (action == "Start" and not self.macro_recording)
+                or (action == "Record" and not self.macro_recording)
                 or (action == "Stop" and self.macro_recording)
             )
             pygame.draw.rect(
@@ -6506,7 +8061,7 @@ class Game:
                 self.macro_command_buttons.append((rect, action))
 
         self.action_buttons.clear()
-        action_y = LEFT_COMMAND_RECT.y + 126
+        action_y = LEFT_COMMAND_RECT.y + 162
         if self.selected_id is not None:
             obj = self.objects[self.selected_id]
             actions = (
@@ -6516,7 +8071,7 @@ class Game:
             )
             self.text(
                 "Selection Actions",
-                (12, LEFT_COMMAND_RECT.y + 100),
+                (12, LEFT_COMMAND_RECT.y + 136),
                 self.small_font,
                 (172, 176, 182),
             )
@@ -6528,10 +8083,20 @@ class Game:
                 disabled = not action_option_enabled(action)
                 pygame.draw.rect(self.screen, (95, 96, 92) if disabled else (223, 220, 196), rect)
                 pygame.draw.rect(self.screen, (75, 76, 73) if disabled else (30, 30, 30), rect, 2)
-                label = action.removesuffix(" (materials required)")
+                label = action.removesuffix(DISABLED_INTERACTION_SUFFIX)
                 self.text(f"{index + 1}. {label}", (rect.x + 8, rect.y + 5), self.small_font, (145, 145, 138) if disabled else (25, 25, 25))
                 if disabled and workbench_recipe:
-                    self.text("materials required", (rect.x + 24, rect.y + 23), self.small_font, (145, 145, 138))
+                    missing = missing_recipe_ingredients(obj, self.player, action)
+                    detail = (
+                        "Missing: "
+                        + ", ".join(
+                            ingredient_requirement_label(item, amount)
+                            for item, amount in missing
+                        )
+                        if missing
+                        else "Requirements not met"
+                    )
+                    self.text(detail, (rect.x + 24, rect.y + 23), self.small_font, (145, 145, 138))
                 self.action_buttons.append((rect, action))
             if not actions:
                 label = "Inspection only during replay" if self.day.mode is Mode.REPLAY else "No available action"
@@ -6539,20 +8104,20 @@ class Game:
         else:
             self.text(
                 "Select an object to show its actions.",
-                (12, LEFT_COMMAND_RECT.y + 100),
+                (12, LEFT_COMMAND_RECT.y + 136),
                 self.small_font,
                 (210, 214, 202),
             )
         action_bottom = max(
             (rect.bottom for rect, _action in self.action_buttons),
-            default=LEFT_COMMAND_RECT.y + 120,
+            default=LEFT_COMMAND_RECT.y + 156,
         )
 
         self.command_buttons.clear()
         menu_title = "Area Commands"
         if self.active_command_category is not None:
             menu_title += f" > {self.active_command_category}"
-        area_menu_y = max(LEFT_COMMAND_RECT.y + 206, action_bottom + 24)
+        area_menu_y = max(LEFT_COMMAND_RECT.y + 242, action_bottom + 24)
         self.text(menu_title, (12, area_menu_y), self.small_font, (172, 176, 182))
         self.text("Quantity", (12, area_menu_y + 28), self.small_font, (172, 176, 182))
         self.area_quantity_buttons.clear()
@@ -6648,6 +8213,8 @@ class Game:
         ]
 
         self.draw_message_history()
+        self.draw_compact_command_menu()
+        self.draw_routine_bar()
 
         hovered = RELOAD_BUTTON.collidepoint(pygame.mouse.get_pos())
         pygame.draw.rect(self.screen, (205, 198, 166) if hovered else (174, 169, 145), RELOAD_BUTTON)
@@ -6690,6 +8257,237 @@ class Game:
                 self.small_font,
             )
         self.screen.set_clip(previous_clip)
+
+    def draw_compact_command_menu(self) -> None:
+        """Draw the nested main command menu over the legacy flat layout."""
+        panel = LEFT_COMMAND_RECT
+        pygame.draw.rect(self.screen, (25, 28, 31), panel)
+        pygame.draw.rect(self.screen, (92, 95, 101), panel, 2)
+        self.text("Command Menu", (panel.x + 12, panel.y + 12), self.font)
+        self.action_buttons.clear()
+        self.command_buttons.clear()
+        self.command_category_buttons.clear()
+        self.area_quantity_buttons.clear()
+        self.target_selection_buttons.clear()
+        self.macro_command_buttons.clear()
+        self.main_macro_dropdown_buttons.clear()
+
+        y = panel.y + 44
+        if self.selected_id is not None:
+            obj = self.objects[self.selected_id]
+            actions = object_action_menu_options(obj, self.player) if self.day.mode is Mode.DIRECT else []
+            if actions:
+                self.text("Selection Actions", (panel.x + 12, y), self.small_font, (172, 176, 182))
+                y += 24
+                for index, action in enumerate(actions):
+                    rect = pygame.Rect(panel.x + 12, y, panel.width - 24, 32)
+                    disabled = not action_option_enabled(action)
+                    pygame.draw.rect(self.screen, (95, 96, 92) if disabled else (223, 220, 196), rect)
+                    pygame.draw.rect(self.screen, (75, 76, 73) if disabled else (30, 30, 30), rect, 2)
+                    self.text(f"{index + 1}. {action}", (rect.x + 8, rect.y + 7), self.small_font, (145, 145, 138) if disabled else (25, 25, 25))
+                    self.action_buttons.append((rect, action))
+                    y += 38
+                y += 8
+
+        title = "Commands" if self.active_command_category is None else self.active_command_category
+        self.text(title, (panel.x + 12, y), self.small_font, (172, 176, 182))
+        y += 25
+        if self.active_command_category is None:
+            for index, category in enumerate(AREA_COMMAND_CATEGORIES):
+                rect = pygame.Rect(panel.x + 12, y, panel.width - 24, 30)
+                pygame.draw.rect(self.screen, (103, 105, 94), rect)
+                pygame.draw.rect(self.screen, (35, 35, 35), rect, 2)
+                self.text(f"{index + 1}. {category}", (rect.x + 8, rect.y + 7), self.small_font, (230, 230, 218))
+                self.command_category_buttons.append((rect, category))
+                y += 35
+            return
+
+        if False and self.active_command_category == "Routines":
+            current_name = self.memory_file_name or "Select routine…"
+            current_status = self.routine_status(self.day.remembered_routine)
+            dropdown = pygame.Rect(panel.x + 12, y, panel.width - 142, 30)
+            play = pygame.Rect(dropdown.right + 8, y, 110, 30)
+            pygame.draw.rect(self.screen, (218, 213, 190), dropdown)
+            pygame.draw.rect(self.screen, (92, 95, 101), dropdown, 2)
+            self.text(
+                current_name,
+                (dropdown.x + 8, dropdown.y + 7),
+                self.small_font,
+                self.routine_status_color(current_status, (35, 35, 35)),
+            )
+            arrow = self.small_font.render("▲" if self.macro_dropdown_open else "▼", True, (35, 35, 35))
+            self.screen.blit(arrow, arrow.get_rect(center=(dropdown.right - 16, dropdown.centery)))
+            pygame.draw.rect(self.screen, (174, 169, 145), play)
+            pygame.draw.rect(self.screen, (35, 35, 35), play, 1)
+            rendered = self.small_font.render("Play", True, (25, 25, 25))
+            self.screen.blit(rendered, rendered.get_rect(center=play.center))
+            self.macro_command_buttons.extend(((dropdown, "Macro Dropdown"), (play, "Play")))
+            y += 38
+            width = (panel.width - 36) // 3
+            for index, action in enumerate(("Record", "Stop", "Edit")):
+                rect = pygame.Rect(panel.x + 12 + index * (width + 6), y, width, 28)
+                enabled = action == "Edit" or (action == "Record" and not self.macro_recording) or (action == "Stop" and self.macro_recording)
+                pygame.draw.rect(self.screen, (174, 169, 145) if enabled else (75, 78, 78), rect)
+                pygame.draw.rect(self.screen, (35, 35, 35), rect, 1)
+                rendered = self.small_font.render(action, True, (25, 25, 25) if enabled else (145, 145, 138))
+                self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+                if enabled:
+                    self.macro_command_buttons.append((rect, action))
+            y += 36
+            toggle = pygame.Rect(panel.x + 12, y, panel.width - 24, 28)
+            pygame.draw.rect(self.screen, (205, 194, 126) if self.routine_moves_expanded else (103, 105, 94), toggle)
+            pygame.draw.rect(self.screen, (35, 35, 35), toggle, 1)
+            toggle_label = f"Moves on Right (R): {'On' if self.routine_moves_expanded else 'Off'}"
+            rendered = self.small_font.render(toggle_label, True, (25, 25, 25))
+            self.screen.blit(rendered, rendered.get_rect(center=toggle.center))
+            self.macro_command_buttons.append((toggle, "Toggle Moves"))
+            y += 36
+            self.text("Moves", (panel.x + 12, y), self.small_font, (172, 176, 182))
+            y += 22
+            for move_index, step in enumerate(self.day.remembered_routine):
+                if y + 22 > panel.bottom - 38:
+                    break
+                prefix = "▶" if self.day.mode is Mode.REPLAY and move_index == self.day.replay_index else " "
+                move_color = self.routine_status_color(
+                    self.routine_step_status(step), (220, 222, 214)
+                )
+                indent = min(18 * self.routine_step_depth(move_index), 108)
+                label = self.routine_step_display_label(move_index)
+                self.text(f"{prefix} {label}", (panel.x + 18 + indent, y), self.small_font, move_color)
+                y += 22
+            back = pygame.Rect(panel.x + 12, y, panel.width - 24, 30)
+            pygame.draw.rect(self.screen, (174, 169, 145), back)
+            pygame.draw.rect(self.screen, (35, 35, 35), back, 2)
+            self.text("Back", (back.x + 8, back.y + 7), self.small_font, (25, 25, 25))
+            self.command_buttons.append((back, "Back"))
+            self.draw_main_macro_dropdown(dropdown)
+            return
+
+        self.text("Quantity", (panel.x + 12, y + 5), self.small_font, (172, 176, 182))
+        for x, label, change in ((panel.x + 112, "-", -1), (panel.x + 160, "+", 1)):
+            rect = pygame.Rect(x, y, 22, 24)
+            pygame.draw.rect(self.screen, (174, 169, 145), rect)
+            pygame.draw.rect(self.screen, (35, 35, 35), rect, 1)
+            rendered = self.small_font.render(label, True, (25, 25, 25))
+            self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+            self.area_quantity_buttons.append((rect, change))
+        value = self.small_font.render(str(self.area_command_quantity), True, (225, 225, 214))
+        self.screen.blit(value, value.get_rect(center=(panel.x + 147, y + 12)))
+        if self.active_command_category in AREA_COMMAND_CATEGORIES:
+            self.text("Target", (panel.x + 198, y + 5), self.small_font, (172, 176, 182))
+            for rect, label, mode in (
+                (pygame.Rect(panel.x + 246, y, 68, 24), "Nearest", "nearest"),
+                (pygame.Rect(panel.x + 318, y, 58, 24), "Target", "target"),
+                (pygame.Rect(panel.x + 380, y, 56, 24), "Area", "area"),
+            ):
+                selected_mode = self.target_selection_mode == mode
+                pygame.draw.rect(
+                    self.screen,
+                    (205, 194, 126) if selected_mode else (103, 105, 94),
+                    rect,
+                )
+                pygame.draw.rect(self.screen, (35, 35, 35), rect, 1)
+                rendered = self.small_font.render(label, True, (25, 25, 25))
+                self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+                self.target_selection_buttons.append((rect, mode))
+        y += 32
+        if self.active_command is not None and self.target_selection_mode in {"target", "area"}:
+            self.text(
+                self.target_selection_summary(),
+                (panel.x + 198, y - 3),
+                self.small_font,
+                (225, 225, 214),
+            )
+            y += 22
+        commands = [*area_commands_for_category(self.player, self.active_command_category), "Back"]
+        for index, command in enumerate(commands):
+            rect = pygame.Rect(panel.x + 12, y, panel.width - 24, 27)
+            pygame.draw.rect(self.screen, (205, 194, 126) if command == self.active_command else (174, 169, 145), rect)
+            pygame.draw.rect(self.screen, (35, 35, 35), rect, 2)
+            self.text(f"{index + 1}. {command}", (rect.x + 7, rect.y + 6), self.small_font, (25, 25, 25))
+            self.command_buttons.append((rect, command))
+            y += 30
+
+    def draw_routine_bar(self) -> None:
+        panel = LEFT_ROUTINE_RECT
+        pygame.draw.rect(self.screen, (31, 35, 38), panel)
+        pygame.draw.rect(self.screen, (92, 95, 101), panel, 2)
+        self.macro_command_buttons.clear()
+        self.main_macro_dropdown_buttons.clear()
+        dropdown = pygame.Rect(panel.x + 10, panel.y + 10, panel.width - 102, 30)
+        play = pygame.Rect(dropdown.right + 6, dropdown.y, 76, 30)
+        manager = pygame.Rect(panel.x + 10, panel.y + 50, panel.width - 20, 28)
+        current_name = self.memory_file_name or "Select routine..."
+        pygame.draw.rect(self.screen, (218, 213, 190), dropdown)
+        pygame.draw.rect(self.screen, (92, 95, 101), dropdown, 2)
+        self.text(current_name, (dropdown.x + 8, dropdown.y + 7), self.small_font, (35, 35, 35))
+        arrow = self.small_font.render("^" if self.macro_dropdown_open else "v", True, (35, 35, 35))
+        self.screen.blit(arrow, arrow.get_rect(center=(dropdown.right - 14, dropdown.centery)))
+        play_label = "Stop" if self.macro_recording else "Play"
+        pygame.draw.rect(self.screen, (174, 169, 145), play)
+        pygame.draw.rect(self.screen, (35, 35, 35), play, 1)
+        rendered = self.small_font.render(play_label, True, (25, 25, 25))
+        self.screen.blit(rendered, rendered.get_rect(center=play.center))
+        pygame.draw.rect(self.screen, (103, 105, 94), manager)
+        pygame.draw.rect(self.screen, (35, 35, 35), manager, 1)
+        manager_label = (
+            f"Recording: {current_name} - Routine Manager"
+            if self.macro_recording
+            else "Routine Manager"
+        )
+        rendered = self.small_font.render(manager_label, True, (230, 230, 218))
+        self.screen.blit(rendered, rendered.get_rect(center=manager.center))
+        self.macro_command_buttons.extend(
+            ((dropdown, "Macro Dropdown"), (play, play_label), (manager, "Routine Manager"))
+        )
+        self.draw_main_macro_dropdown(dropdown)
+
+    def draw_routine_moves_dock(self) -> None:
+        panel = RIGHT_DOCK_RECT
+        pygame.draw.rect(self.screen, (25, 28, 31), panel)
+        pygame.draw.rect(self.screen, (92, 95, 101), panel, 2)
+        self.text("Routine Moves", (panel.x + 14, panel.y + 14), self.font)
+        name = self.memory_file_name or "Unnamed routine"
+        self.text(name, (panel.x + 14, panel.y + 48), self.small_font, (172, 176, 182))
+        self.text("Press R to restore player panels", (panel.x + 14, panel.y + 74), self.small_font, (172, 176, 182))
+        y = panel.y + 110
+        for index, step in enumerate(self.day.remembered_routine):
+            if y + 34 > panel.bottom - 12:
+                break
+            row = pygame.Rect(panel.x + 10, y, panel.width - 20, 30)
+            active = self.day.mode is Mode.REPLAY and index == self.day.replay_index
+            pygame.draw.rect(self.screen, (116, 111, 83) if active else (47, 52, 55), row)
+            pygame.draw.rect(self.screen, (188, 170, 105) if active else (92, 95, 101), row, 2 if active else 1)
+            move_color = self.routine_status_color(
+                self.routine_step_status(step), (235, 235, 225)
+            )
+            indent = min(18 * self.routine_step_depth(index), 108)
+            self.text(self.routine_step_display_label(index), (row.x + 9 + indent, row.y + 7), self.small_font, move_color)
+            y += 35
+
+    def draw_main_macro_dropdown(self, dropdown: pygame.Rect) -> None:
+        self.main_macro_dropdown_buttons.clear()
+        if not self.macro_dropdown_open:
+            return
+        entries = [("History", 0.0), ("__new__", 0.0), *sorted(
+            self.available_command_sets(), key=lambda item: item[0].lower()
+        )]
+        for index, (name, _modified) in enumerate(entries):
+            option = pygame.Rect(dropdown.x, dropdown.bottom + index * 30, dropdown.width, 30)
+            if option.bottom > LEFT_MESSAGE_HISTORY_RECT.top:
+                break
+            pygame.draw.rect(self.screen, (234, 229, 207), option)
+            pygame.draw.rect(self.screen, (92, 95, 101), option, 1)
+            label = "New…" if name == "__new__" else name
+            label_color = (
+                (35, 35, 35)
+                if name in {"__new__", "History"}
+                else self.routine_status_color(
+                    self.named_routine_status(name), (35, 35, 35)
+                )
+            )
+            self.text(label, (option.x + 8, option.y + 7), self.small_font, label_color)
+            self.main_macro_dropdown_buttons.append((option, name))
 
     def draw_message_history(self, panel: pygame.Rect = LEFT_MESSAGE_HISTORY_RECT) -> None:
         pygame.draw.rect(self.screen, (31, 35, 38), panel)
@@ -6845,7 +8643,7 @@ class Game:
         self.day_plan_buttons.append((conditional, "add_conditional", None))
         editor = pygame.Rect(right.x + 12, right.bottom - 104, right.width - 24, 38)
         start = pygame.Rect(right.x + 12, right.bottom - 56, right.width - 24, 42)
-        for rect, label, action, color in ((editor, "Macro Editor", "editor", (174, 169, 145)), (start, "Start Day", "start", (195, 194, 157))):
+        for rect, label, action, color in ((editor, "Routine Manager", "editor", (174, 169, 145)), (start, "Start Day", "start", (195, 194, 157))):
             pygame.draw.rect(self.screen, color, rect)
             pygame.draw.rect(self.screen, (43, 43, 43), rect, 2)
             rendered = self.font.render(label, True, (35, 35, 35))
@@ -6876,8 +8674,13 @@ class Game:
         preview_screen = self.camera.world_to_screen(
             self.command_editor_preview_position()
         )
+        self.memory_editor_map_camera = (
+            self.camera.x,
+            self.camera.y,
+            self.camera.effective_zoom,
+        )
         if self._editor_camera_restore is not None:
-            self.camera.x, self.camera.y = self._editor_camera_restore
+            self.camera.x, self.camera.y, self.camera.zoom = self._editor_camera_restore
             self._editor_camera_restore = None
         self.screen.fill((25, 28, 31))
         scaled_map = pygame.transform.smoothscale(
@@ -6896,12 +8699,39 @@ class Game:
         )
         self.draw_command_editor_preview_avatar((preview_x, preview_y))
         pygame.draw.rect(self.screen, (188, 170, 105), COMMAND_EDITOR_MAP_RECT, 2)
+        if self.day.remembered_routine:
+            step = self.day.remembered_routine[self.memory_edit_index]
+            if step.action == "Move To":
+                hint = (
+                    "Click the map to choose the new destination"
+                    if self.memory_map_field_selection == "target_point"
+                    else "Target point: click the field, then click the map"
+                )
+                self.text(
+                    hint,
+                    (COMMAND_EDITOR_MAP_RECT.x + 10, COMMAND_EDITOR_MAP_RECT.bottom - 24),
+                    self.small_font,
+                    (255, 245, 190),
+                )
+            elif step.action == "Harvest and Eat Berries":
+                mode = routine_field_editor_value(step, "target_mode")
+                hint = {
+                    "nearest": "Target: nearest available berry bush",
+                    "area": "Target: drag an area on the map",
+                    "specific": "Target: click a berry bush on the map",
+                }[mode]
+                self.text(
+                    hint,
+                    (COMMAND_EDITOR_MAP_RECT.x + 10, COMMAND_EDITOR_MAP_RECT.bottom - 24),
+                    self.small_font,
+                    (255, 245, 190),
+                )
         self.draw_message_history(COMMAND_EDITOR_MESSAGES_RECT)
 
         panel = COMMAND_EDITOR_RECT.inflate(-24, -24)
         pygame.draw.rect(self.screen, (232, 227, 205), panel)
         pygame.draw.rect(self.screen, (43, 43, 43), panel, 4)
-        self.text("Command Set Editor", (panel.x + 28, panel.y + 18), self.title_font, (35, 35, 35))
+        self.text("Routine Manager", (panel.x + 28, panel.y + 18), self.title_font, (35, 35, 35))
         self.text(
             "C/Esc closes · Enter saves a field · Values use JSON syntax.",
             (panel.x + 360, panel.y + 31),
@@ -6911,8 +8741,8 @@ class Game:
         routine = self.day.remembered_routine
         self.memory_editor_rows.clear()
         self.memory_editor_buttons.clear()
-        self.text("Set name", (panel.x + 24, panel.y + 62), self.small_font, (35, 35, 35))
-        self.memory_file_name_rect = pygame.Rect(panel.x + 96, panel.y + 54, 170, 30)
+        self.text("Routine name", (panel.x + 24, panel.y + 62), self.small_font, (35, 35, 35))
+        self.memory_file_name_rect = pygame.Rect(panel.x + 120, panel.y + 54, 146, 30)
         editing_name = self.memory_edit_field == "__memory_file_name__"
         pygame.draw.rect(
             self.screen,
@@ -6928,12 +8758,18 @@ class Game:
             (35, 35, 35),
         )
         next_button_x = self.memory_file_name_rect.right + 8
-        for label in ["New Set", "Save", "Load", "Run Now", "Record Macro"]:
+        for label, action in [
+            ("New Routine", "New Set"),
+            ("Save", "Save"),
+            ("Load", "Load"),
+            ("Run Now", "Run Now"),
+            ("Record Routine", "Record Routine"),
+        ]:
             width = (
                 100
-                if label == "Record Macro"
+                if label == "Record Routine"
                 else 84
-                if label in {"New Set", "Run Now"}
+                if action in {"New Set", "Run Now"}
                 else 72
             )
             x = next_button_x
@@ -6942,16 +8778,29 @@ class Game:
             pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
             rendered = self.small_font.render(label, True, (35, 35, 35))
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
-            self.memory_editor_buttons.append((rect, label))
+            self.memory_editor_buttons.append((rect, action))
             next_button_x = rect.right + 8
 
-        list_rect = pygame.Rect(panel.x + 24, panel.y + 94, 330, panel.height - 162)
+        for index, label in enumerate(("Duplicate Routine", "Rename Routine")):
+            rect = pygame.Rect(panel.x + 24 + index * 142, panel.y + 90, 134, 28)
+            pygame.draw.rect(self.screen, (174, 169, 145), rect)
+            pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
+            rendered = self.small_font.render(label, True, (35, 35, 35))
+            self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+            self.memory_editor_buttons.append((rect, label))
+
+        list_rect = pygame.Rect(panel.x + 24, panel.y + 126, 330, panel.height - 194)
         pygame.draw.rect(self.screen, (218, 213, 190), list_rect)
         visible_count = 12
         start = max(0, min(self.memory_edit_index - visible_count // 2, len(routine) - visible_count))
-        for visible_index, routine_index in enumerate(range(start, min(len(routine), start + visible_count))):
+        row_y = list_rect.y + 8
+        for routine_index in range(start, min(len(routine), start + visible_count)):
             step = routine[routine_index]
-            rect = pygame.Rect(list_rect.x + 8, list_rect.y + 8 + visible_index * 38, list_rect.width - 16, 32)
+            if row_y + 32 > list_rect.bottom - 8:
+                break
+            depth = self.routine_step_depth(routine_index)
+            indent = min(24 * depth, list_rect.width // 2)
+            rect = pygame.Rect(list_rect.x + 8 + indent, row_y, list_rect.width - 16 - indent, 32)
             selected = routine_index == self.memory_edit_index
             pygame.draw.rect(self.screen, (195, 194, 157) if selected else (213, 209, 183), rect)
             next_command = (
@@ -6964,22 +8813,44 @@ class Game:
                 rect,
                 4 if next_command else 2 if selected else 1,
             )
-            quantity = f" ×{step.quantity}" if step.quantity is not None else ""
-            self.text(f"{routine_index + 1}. {step.action}{quantity}", (rect.x + 10, rect.y + 8), self.small_font, (35, 35, 35))
+            label = self.routine_step_display_label(routine_index)
+            label_color = (
+                (92, 67, 38)
+                if step.action in ROUTINE_CONTROL_ACTIONS
+                else (35, 35, 35)
+            )
+            self.text(label, (rect.x + 10, rect.y + 8), self.small_font, label_color)
             self.memory_editor_rows.append((rect, routine_index))
+            row_y += 38
         if not routine:
             self.text("No remembered commands.", (list_rect.x + 18, list_rect.y + 18), self.font, (70, 70, 65))
 
         self.memory_editor_fields.clear()
+        self.memory_field_dropdown_buttons.clear()
         if routine:
             step = routine[self.memory_edit_index]
             field_x = list_rect.right + 24
             field_width = panel.right - field_x - 24
+            if step.action == ROUTINE_REFERENCE_ACTION:
+                expand = pygame.Rect(field_x, panel.y + 126, 180, 32)
+                pygame.draw.rect(self.screen, (174, 169, 145), expand)
+                pygame.draw.rect(self.screen, (55, 55, 50), expand, 1)
+                rendered = self.small_font.render("Expand Routine", True, (35, 35, 35))
+                self.screen.blit(rendered, rendered.get_rect(center=expand.center))
+                self.memory_editor_buttons.append((expand, "Expand Routine"))
             for index, field_name in enumerate(routine_step_editable_fields(step)):
-                y = panel.y + 94 + index * 38
+                y = panel.y + 126 + index * 38
                 value_rect = pygame.Rect(field_x + 164, y, field_width - 164, 32)
-                self.text(field_name, (field_x, y + 7), self.small_font, (35, 35, 35))
-                active = field_name == self.memory_edit_field
+                field_label = {
+                    "target_mode": "Target",
+                    "target_point": "Target point",
+                    "area_bounds": "Target area",
+                }.get(field_name, field_name)
+                self.text(field_label, (field_x, y + 7), self.small_font, (35, 35, 35))
+                active = (
+                    field_name == self.memory_edit_field
+                    or field_name == self.memory_map_field_selection
+                )
                 pygame.draw.rect(
                     self.screen,
                     (255, 250, 225) if active else (218, 213, 190),
@@ -6991,16 +8862,42 @@ class Game:
                     value_rect,
                     2,
                 )
-                value_text = (
-                    self.memory_edit_buffer
-                    if active
-                    else json.dumps(routine_field_editor_value(step, field_name))
-                )
+                choices = self.memory_field_choices(field_name)
+                raw_value = routine_field_editor_value(step, field_name)
+                if field_name == self.memory_map_field_selection:
+                    value_text = "Click a destination on the map…"
+                elif active:
+                    value_text = self.memory_edit_buffer
+                elif choices is not None:
+                    value_text = next(
+                        (label for label, value in choices if value == raw_value),
+                        str(raw_value),
+                    )
+                else:
+                    value_text = json.dumps(raw_value)
                 while value_text and self.small_font.size(value_text)[0] > value_rect.width - 12:
                     value_text = "…" + value_text[2:]
                 self.text(value_text, (value_rect.x + 6, value_rect.y + 7), self.small_font, (35, 35, 35))
+                if choices is not None:
+                    arrow = self.small_font.render(
+                        "▲" if self.memory_field_dropdown_open == field_name else "▼",
+                        True,
+                        (35, 35, 35),
+                    )
+                    self.screen.blit(
+                        arrow,
+                        arrow.get_rect(center=(value_rect.right - 14, value_rect.centery)),
+                    )
                 self.memory_editor_fields.append((value_rect, field_name))
-        labels = ["Move Up", "Move Down", "Duplicate", "Remove", "New", "Done"]
+        labels = [
+            "Move Up",
+            "Move Down",
+            "Remove",
+            "Add Command",
+            "Add Conditional",
+            "Add Loop",
+            "Done",
+        ]
         button_width = (panel.width - 48 - (len(labels) - 1) * 8) // len(labels)
         for index, label in enumerate(labels):
             rect = pygame.Rect(
@@ -7015,8 +8912,40 @@ class Game:
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
             self.memory_editor_buttons.append((rect, label))
 
+        if routine and self.memory_field_dropdown_open is not None:
+            self.draw_memory_field_dropdown(panel)
+
         if self.memory_browser_open:
             self.draw_memory_browser(panel)
+
+    def draw_memory_field_dropdown(self, panel: pygame.Rect) -> None:
+        field_name = self.memory_field_dropdown_open
+        if field_name is None:
+            return
+        field_rect = next(
+            (rect for rect, name in self.memory_editor_fields if name == field_name),
+            None,
+        )
+        choices = self.memory_field_choices(field_name)
+        if field_rect is None or choices is None:
+            self.memory_field_dropdown_open = None
+            return
+        max_rows = max(1, (panel.bottom - field_rect.bottom - 12) // 28)
+        column_count = min(2, max(1, math.ceil(len(choices) / max_rows)))
+        option_width = field_rect.width // column_count
+        for index, (label, value) in enumerate(choices[: max_rows * column_count]):
+            column = index // max_rows
+            row = index % max_rows
+            option = pygame.Rect(
+                field_rect.x + column * option_width,
+                field_rect.bottom + row * 28,
+                option_width,
+                28,
+            )
+            pygame.draw.rect(self.screen, (238, 233, 211), option)
+            pygame.draw.rect(self.screen, (90, 88, 78), option, 1)
+            self.text(label, (option.x + 7, option.y + 6), self.small_font, (35, 35, 35))
+            self.memory_field_dropdown_buttons.append((option, field_name, value))
 
     def command_editor_preview_position(self) -> tuple[float, float]:
         position = (float(self.player.x), float(self.player.y))

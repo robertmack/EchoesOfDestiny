@@ -1,5 +1,7 @@
 import pygame
+import pytest
 
+import remembering.game as game_module
 from remembering.model import DayState, RoutineStep, day_progress_ratio, format_clock_time
 from remembering.game import (
     AreaTarget,
@@ -20,6 +22,7 @@ from remembering.game import (
     sun_track_position,
 )
 from remembering.model import Mode
+from remembering.tiles import TileKind
 
 
 def test_clock_starts_at_six_am() -> None:
@@ -34,7 +37,25 @@ def test_day_progress_ratio_clamps_across_the_day() -> None:
     assert day_progress_ratio(840) < 0.6
 
 
-def test_day_transition_rewinds_recorded_route_and_accelerates(tmp_path) -> None:
+def test_day_and_attempt_are_separate_counters() -> None:
+    day = DayState()
+
+    assert day.number == 1
+    assert day.attempts == 1
+
+
+def test_restore_advances_attempt_without_advancing_day(tmp_path) -> None:
+    game = Game(
+        fullscreen=False,
+        persistence_path=tmp_path / "current_level.jsonc",
+    )
+
+    assert game.finish_day() is True
+    assert game.day.number == 1
+    assert game.day.attempts == 2
+
+
+def test_day_transition_rewinds_route_at_selected_speed(tmp_path) -> None:
     game = Game(fullscreen=False, persistence_path=tmp_path / "current_level.jsonc")
     start = (game.player.x, game.player.y)
     game.day_position_history = [
@@ -43,14 +64,19 @@ def test_day_transition_rewinds_recorded_route_and_accelerates(tmp_path) -> None
         (start[0] + 40, start[1]),
     ]
     game.player.x, game.player.y = game.day_position_history[-1]
+    game.day.current_time_minutes = 23 * 60
 
     game.begin_day_transition()
-    initial_speed = game.rewind_speed
-    game.update_day_transition(0.01)
+    assert game.day_transition_phase == "night_bumper"
+    assert game.displayed_time_minutes() == 23 * 60
+    game.update_day_transition(game_module.NIGHT_BUMPER_DURATION_SECONDS)
+    game.time_speed = 1.0
+    game.update_day_transition(0.05)
 
     assert game.day_transition_phase == "rewind"
-    assert game.rewind_speed > initial_speed
-    assert game.player.x < start[0] + 40
+    assert game.rewind_speed == 1.0
+    assert game.player.x == start[0] + 20
+    assert game.displayed_time_minutes() < 23 * 60
 
     for _ in range(100):
         game.update_day_transition(0.05)
@@ -59,6 +85,107 @@ def test_day_transition_rewinds_recorded_route_and_accelerates(tmp_path) -> None
 
     assert game.day_transition_phase == "fade_out"
     assert (game.player.x, game.player.y) == start
+
+
+def test_rewind_finishes_the_day_once_without_restarting(monkeypatch) -> None:
+    game = Game(fullscreen=False)
+    start = (game.player.x, game.player.y)
+    game.day_position_history = [start, (start[0] + 20, start[1])]
+    game.player.x, game.player.y = game.day_position_history[-1]
+    finish_calls = 0
+
+    def finish_day() -> bool:
+        nonlocal finish_calls
+        finish_calls += 1
+        return True
+
+    monkeypatch.setattr(game, "finish_day", finish_day)
+    game.begin_day_transition()
+
+    game.update_day_transition(game_module.NIGHT_BUMPER_DURATION_SECONDS)
+    game.update_day_transition(FIXED_SIMULATION_TICK_SECONDS)
+    assert game.day_transition_phase == "fade_out"
+    assert game.day_transition_progress == 1.0
+    game.update_day_transition(0.0)
+
+    assert finish_calls == 1
+    assert game.day_transition_phase == "planner"
+
+
+def test_rewind_speed_can_be_changed_while_it_is_playing(tmp_path) -> None:
+    game = Game(fullscreen=False, persistence_path=tmp_path / "current_level.jsonc")
+    start = (game.player.x, game.player.y)
+    game.day_position_history = [
+        (start[0] + index, start[1]) for index in range(20)
+    ]
+    game.player.x, game.player.y = game.day_position_history[-1]
+    game.begin_day_transition()
+    game.update_day_transition(game_module.NIGHT_BUMPER_DURATION_SECONDS)
+
+    pygame.event.post(
+        pygame.event.Event(
+            pygame.KEYDOWN,
+            key=pygame.K_PLUS,
+            mod=0,
+            unicode="+",
+        )
+    )
+    game.handle_events()
+
+    assert game.time_speed == 2.0
+    game.update_day_transition(0.05)
+    assert game.rewind_cursor == pytest.approx(17.0)
+
+
+def test_fast_rewind_batches_checkpoint_restoration(monkeypatch) -> None:
+    game = Game(fullscreen=False)
+    start = (game.player.x, game.player.y)
+    game.day_position_history = [
+        (start[0] + index, start[1]) for index in range(101)
+    ]
+    game.player.x, game.player.y = game.day_position_history[-1]
+    snapshots = [{"marker": index} for index in range(3)]
+    game.rewind_checkpoints = [
+        (70, "First", snapshots[0]),
+        (80, "Second", snapshots[1]),
+        (90, "Third", snapshots[2]),
+    ]
+    restored: list[dict[str, object]] = []
+    monkeypatch.setattr(game, "restore_rewind_checkpoint", restored.append)
+
+    game.begin_day_transition()
+    game.time_speed = 40.0
+    game.update_day_rewind(FIXED_SIMULATION_TICK_SECONDS)
+
+    assert game.rewind_cursor == pytest.approx(60.0)
+    assert restored == [snapshots[0]]
+    assert game.rewind_checkpoint_index == -1
+
+
+def test_rewind_path_points_back_along_recorded_route_not_to_bed() -> None:
+    game = Game(fullscreen=False)
+    start = (game.player.x, game.player.y)
+    game.day_position_history = [
+        start,
+        (start[0] + 10, start[1]),
+        (start[0] + 20, start[1]),
+        (start[0] + 30, start[1]),
+    ]
+    bed_destination = game.object_of_type("bed").center
+    game.navigation_path = [bed_destination]
+    game.player.x, game.player.y = (start[0] + 25, start[1])
+    game.day_transition_phase = "rewind"
+    game.rewind_cursor = 2.5
+
+    points = game.visible_path_world_points()
+
+    assert points == [
+        (start[0] + 25, start[1]),
+        (start[0] + 20, start[1]),
+        (start[0] + 10, start[1]),
+        start,
+    ]
+    assert bed_destination not in points
 
 
 def test_clock_continues_after_ten_pm(tmp_path) -> None:
@@ -70,11 +197,48 @@ def test_clock_continues_after_ten_pm(tmp_path) -> None:
     assert game.day.current_time_minutes == 22 * 60 + 1
 
 
-def test_rewind_undoes_command_state_when_it_reaches_that_command(tmp_path) -> None:
+def test_late_night_hints_are_data_driven_and_shown_once() -> None:
+    game = Game(fullscreen=False)
+    game.day.current_time_minutes = 1499
+
+    game._update_simulation_tick(1.0)
+
+    assert game.day.current_time_minutes == 1500
+    assert game.day_transition_phase is None
+    assert game.messages[-1] == "The night has grown very still."
+    assert game.thought_bubble_source == "night_hint"
+    message_count = game.messages.count("The night has grown very still.")
+
+    game._update_simulation_tick(1.0)
+
+    assert game.messages.count("The night has grown very still.") == message_count
+
+
+def test_three_thirteen_forces_night_and_caps_the_clock() -> None:
+    game = Game(fullscreen=False)
+    game.day.current_time_minutes = 1632
+
+    game._update_simulation_tick(5.0)
+
+    assert game.day.current_time_minutes == 1633
+    assert game.day_transition_phase == "night_bumper"
+    assert game.messages[-1] == (
+        "The hour arrives. Your eyes close before you decide to close them."
+    )
+
+
+def test_rewind_restores_command_state_when_it_reaches_the_command(tmp_path) -> None:
     game = Game(fullscreen=False, persistence_path=tmp_path / "current_level.jsonc")
     branch = game.object_of_type("branch")
+    tile_index = next(
+        index
+        for index, candidate in enumerate(game.map.tile_map.tiles)
+        if candidate.kind is TileKind.GRASSLAND
+    )
+    tile = game.map.tile_map.tiles[tile_index]
     game.record_rewind_checkpoint("Gather")
     branch.active = False
+    tile.kind = TileKind.SOIL
     start = (game.player.x, game.player.y)
     game.day_position_history = [
         start,
@@ -84,7 +248,9 @@ def test_rewind_undoes_command_state_when_it_reaches_that_command(tmp_path) -> N
     game.player.x, game.player.y = game.day_position_history[-1]
 
     game.begin_day_transition()
+    game.update_day_transition(game_module.NIGHT_BUMPER_DURATION_SECONDS)
     assert game.objects[branch.object_id].active is False
+    assert tile.kind is TileKind.SOIL
     game.update_day_transition(0.01)
     assert game.objects[branch.object_id].active is False
 
@@ -94,6 +260,7 @@ def test_rewind_undoes_command_state_when_it_reaches_that_command(tmp_path) -> N
             break
 
     assert game.objects[branch.object_id].active is True
+    assert game.map.tile_map.tiles[tile_index].kind is TileKind.GRASSLAND
 
 
 def test_game_clock_advances_during_play_but_pauses_at_morning() -> None:

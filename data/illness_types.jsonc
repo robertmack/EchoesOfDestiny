@@ -1,0 +1,47 @@
+// Temporary illnesses. Values are percentage chances for each per-minute check.
+{
+  "defaults": {
+    "recovery_threshold": 1.0,
+    "tint_color": [126, 190, 108]
+  },
+  "illness_types": [
+    {
+      "id": "contaminated_water",
+      "name": "Contaminated Water",
+      "description": "Sickness contracted by drinking contaminated water.",
+      "initial_value": 60.0,
+      "incubation_minutes": [120, 240],
+      "onset_thought": "I feel ill...",
+      "effect": {
+        "type": "vomit",
+        "grace_minutes": [30, 90],
+        "thought": "I think I'm going to— BLEURGH!",
+        "clear_rate": 0.50,
+        "condition_effects": {
+          "trauma": -3.0,
+          "hunger": -8.0,
+          "thirst": -12.0
+        }
+      }
+    },
+    {
+      "id": "raw_berry_food_poisoning",
+      "name": "Raw Berry Food Poisoning",
+      "description": "A mild sickness caused by unlucky raw berries.",
+      "initial_value": 20.0,
+      "incubation_minutes": [5, 15],
+      "onset_thought": "Those berries aren't sitting right...",
+      "effect": {
+        "type": "vomit",
+        "grace_minutes": [2, 10],
+        "thought": "Urgh— BLEURGH!",
+        "clear_rate": 1.0,
+        "condition_effects": {
+          "trauma": -1.0,
+          "hunger": -3.0,
+          "thirst": -4.0
+        }
+      }
+    }
+  ]
+}

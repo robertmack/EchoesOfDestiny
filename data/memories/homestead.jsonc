@@ -1,1 +1,477 @@
-{"_schema_version":1,"name":"homestead","commands":[{"action":"Gather Pebbles","area_bounds":{"start":{"tilexy":[57,72],"subtilexy":[0,0]},"end":{"tilexy":[82,88],"subtilexy":[0,0]}},"quantity":7,"target_areas":[{"start":{"tilexy":[57,72],"subtilexy":[0,0]},"end":{"tilexy":[82,88],"subtilexy":[0,0]}}]},{"action":"Gather Branches","area_bounds":{"start":{"tilexy":[54,72],"subtilexy":[0,0]},"end":{"tilexy":[81,88],"subtilexy":[0,0]}},"quantity":7,"target_areas":[{"start":{"tilexy":[54,72],"subtilexy":[0,0]},"end":{"tilexy":[81,88],"subtilexy":[0,0]}}]},{"action":"Gather Tall Grass","area_bounds":{"start":{"tilexy":[56,72],"subtilexy":[0,0]},"end":{"tilexy":[82,90],"subtilexy":[0,0]}},"quantity":7,"target_areas":[{"start":{"tilexy":[56,72],"subtilexy":[0,0]},"end":{"tilexy":[82,90],"subtilexy":[0,0]}}]},{"action":"Craft Crude Hoe","target_id":4,"target_type":"workbench","target_point":{"tilexy":[55,66],"subtilexy":[0.0,0.0]}},{"action":"Craft Crude Axe","target_id":4,"target_type":"workbench","target_point":{"tilexy":[55,66],"subtilexy":[0.0,0.0]}},{"action":"Weave Fiber Basket","target_id":4,"target_type":"workbench","target_point":{"tilexy":[55,66],"subtilexy":[0.0,0.0]}},{"action":"Chop Trees","area_bounds":{"start":{"tilexy":[24,80],"subtilexy":[0,0]},"end":{"tilexy":[46,93],"subtilexy":[0,0]}},"quantity":7,"target_areas":[{"start":{"tilexy":[24,80],"subtilexy":[0,0]},"end":{"tilexy":[46,93],"subtilexy":[0,0]}}]},{"action":"Craft Wooden Bucket","target_id":4,"target_type":"workbench","target_point":{"tilexy":[55,66],"subtilexy":[0.0,0.0]}},{"action":"Till Grassland","area_bounds":{"start":{"tilexy":[72,81],"subtilexy":[0,0]},"end":{"tilexy":[74,83],"subtilexy":[0,0]}},"target_areas":[{"start":{"tilexy":[70,80],"subtilexy":[0,0]},"end":{"tilexy":[74,84],"subtilexy":[0,0]}}],"max_game_minutes":120},{"action":"Gather Tall Grass","area_bounds":{"start":{"tilexy":[59,73],"subtilexy":[0,0]},"end":{"tilexy":[85,94],"subtilexy":[0,0]}},"quantity":7,"target_areas":[{"start":{"tilexy":[59,73],"subtilexy":[0,0]},"end":{"tilexy":[85,94],"subtilexy":[0,0]}}]},{"action":"Build Barrel","area_bounds":{"start":{"tilexy":[78,81],"subtilexy":[0,0]},"end":{"tilexy":[79,82],"subtilexy":[0,0]}},"quantity":1,"target_areas":[{"start":{"tilexy":[78,81],"subtilexy":[0,0]},"end":{"tilexy":[79,82],"subtilexy":[0,0]}}]},{"action":"Gather Seeds","area_bounds":{"start":{"tilexy":[58,72],"subtilexy":[0,0]},"end":{"tilexy":[84,90],"subtilexy":[0,0]}},"quantity":16,"target_areas":[{"start":{"tilexy":[58,72],"subtilexy":[0,0]},"end":{"tilexy":[84,90],"subtilexy":[0,0]}}]},{"action":"Plant Wheat","area_bounds":{"start":{"tilexy":[70,80],"subtilexy":[0,0]},"end":{"tilexy":[74,84],"subtilexy":[0,0]}},"quantity":16,"target_areas":[{"start":{"tilexy":[70,80],"subtilexy":[0,0]},"end":{"tilexy":[74,84],"subtilexy":[0,0]}}]},{"action":"Tend Crops","area_bounds":{"start":{"tilexy":[70,80],"subtilexy":[0,0]},"end":{"tilexy":[74,84],"subtilexy":[0,0]}},"quantity":16,"target_areas":[{"start":{"tilexy":[72,81],"subtilexy":[0,0]},"end":{"tilexy":[74,83],"subtilexy":[0,0]}}]},{"action":"Water Crops","area_bounds":{"start":{"tilexy":[70,80],"subtilexy":[0,0]},"end":{"tilexy":[74,84],"subtilexy":[0,0]}},"quantity":16,"secondary_bounds":{"start":{"tilexy":[87,88],"subtilexy":[0,0]},"end":{"tilexy":[88,89],"subtilexy":[0,0]}},"source_areas":[{"start":{"tilexy":[87,88],"subtilexy":[0,0]},"end":{"tilexy":[88,89],"subtilexy":[0,0]}}]},{"action":"Fill Barrel","target_id":2013363,"target_type":"barrel","area_bounds":{"start":{"tilexy":[87,88],"subtilexy":[0,0]},"end":{"tilexy":[88,89],"subtilexy":[0,0]}},"target_point":{"tilexy":[78,81],"subtilexy":[32.0,32.0]},"source_areas":[{"start":{"tilexy":[87,88],"subtilexy":[0,0]},"end":{"tilexy":[88,89],"subtilexy":[0,0]}}],"target_build_memory":"barrel:78:81"}]}
+{
+    "_schema_version": 1,
+    "name": "homestead",
+    "commands": [
+        {
+            "action": "Harvest Berries",
+            "target_id": 1569,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    66,
+                    73
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            },
+            "nearest_to_player": true
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1429,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    75,
+                    67
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1430,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    78,
+                    67
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1414,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    77,
+                    66
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1927,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    82,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1928,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    83,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    87,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2050,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    91
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2034,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    85,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    90,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    91
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    89
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    89
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Gather",
+            "target_id": 1932,
+            "target_type": "branch",
+            "target_point": {
+                "tilexy": [
+                    90,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    90,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    89
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Drink Water",
+            "target_point": {
+                "tilexy": [
+                    87,
+                    89
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1870,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    84
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1872,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    91,
+                    84
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 1984,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2088,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    92
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2147,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    91,
+                    94
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_type": "berry"
+        }
+    ]
+}
