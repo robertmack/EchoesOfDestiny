@@ -1,0 +1,120 @@
+{
+    "_schema_version": 1,
+    "_defaults": {
+        "conditions": {
+            // Condition percentages are burdens: 0 is healthy and 99 is critical.
+            // The greatest "minimum" at or below the current percentage is used.
+            "trauma": {
+                "descriptor_table": [
+                    {"minimum": 0, "text": "unharmed", "color": [154, 205, 154], "font": "plain"},
+                    {"minimum": 25, "text": "bruised", "color": [218, 194, 112], "font": "plain"},
+                    {"minimum": 50, "text": "traumatized", "color": [230, 151, 78], "font": "bold"},
+                    {"minimum": 75, "text": "badly traumatized", "color": [235, 112, 76], "font": "bold"},
+                    {"minimum": 90, "text": "critically traumatized", "color": [245, 72, 72], "font": "bold"}
+                ]
+            },
+            "hunger": {
+                "descriptor_table": [
+                    {"minimum": 0, "text": "well fed", "color": [154, 205, 154], "font": "plain"},
+                    {"minimum": 25, "text": "peckish", "color": [218, 194, 112], "font": "italic"},
+                    {"minimum": 50, "text": "hungry", "color": [230, 151, 78], "font": "italic"},
+                    {"minimum": 75, "text": "starving", "color": [235, 112, 76], "font": "bold"},
+                    {"minimum": 95, "text": "dying of hunger", "color": [244, 145, 52], "font": "bold"}
+                ]
+            },
+            "thirst": {
+                "descriptor_table": [
+                    {"minimum": 0, "text": "hydrated", "color": [154, 205, 154], "font": "plain"},
+                    {"minimum": 25, "text": "thirsty", "color": [115, 190, 225], "font": "italic"},
+                    {"minimum": 50, "text": "parched", "color": [230, 151, 78], "font": "italic"},
+                    {"minimum": 75, "text": "dehydrated", "color": [235, 112, 76], "font": "bold"},
+                    {"minimum": 95, "text": "dying of thirst", "color": [72, 174, 245], "font": "bold"}
+                ]
+            },
+            "fatigue": {
+                "descriptor_table": [
+                    {"minimum": 0, "text": "well rested", "color": [154, 205, 154], "font": "plain"},
+                    {"minimum": 25, "text": "weary", "color": [180, 174, 220], "font": "italic"},
+                    {"minimum": 50, "text": "tired", "color": [218, 194, 112], "font": "italic"},
+                    {"minimum": 75, "text": "exhausted", "color": [235, 112, 76], "font": "italic"},
+                    {"minimum": 95, "text": "barely conscious", "color": [188, 132, 235], "font": "bold"}
+                ]
+            }
+        },
+        "secondary_stats": {
+            "movement_speed": {},
+            "task_speed": {},
+            "healing_rate": {
+                "unit": "trauma_per_game_hour"
+            }
+        },
+        "skills": {
+            "farming": {},
+            "crafting": {},
+            "harvesting": {
+                "experience_per_level": 10,
+                "experience_per_action": 1,
+                "speed_per_level": 0.05
+            }
+        },
+        "behavior": {
+            "predator": false,
+            "priorities": {},
+            "diet": {},
+            "senses": {
+                "hearing_distance": 0,
+                "smell_distance": 0,
+                "vision_distance": 0
+            },
+            "sleep": {},
+            "reproduction": {
+                "enabled": false
+            },
+            "attacks": {},
+            "abilities": {}
+        }
+    },
+    // A character type may set "inherits" to another type ID. The parent is
+    // deep-merged first, then the child overrides only the fields it changes.
+    "character_types": [
+        {
+            "id": "human",
+            "name": "Human",
+            "description": "An adaptable person capable of learning skills, shaping the world, and teaching it to remember."
+        },
+        {
+            "id": "rabbit",
+            "name": "Rabbit",
+            "description": "A social forager that eats wild plants, plays, sleeps, breeds, and eagerly seeks cultivated crops.",
+            "behavior": {
+                "priorities": {
+                    "eat": {},
+                    "sleep": {},
+                    "play": {},
+                    "breed": {}
+                },
+                "diet": {
+                    "wild_food": {},
+                    "crops": {
+                        "preferred": true
+                    }
+                },
+                "reproduction": {
+                    "enabled": true
+                },
+                "abilities": {
+                    "flee": {},
+                    "play": {}
+                }
+            }
+        },
+        {
+            "id": "wolf",
+            "name": "Wolf",
+            "description": "A keen-sensed predator whose hunting, territorial, and social behavior will emerge as the wilderness develops.",
+            "behavior": {
+                "predator": true
+            }
+        }
+    ]
+}

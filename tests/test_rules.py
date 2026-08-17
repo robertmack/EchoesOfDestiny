@@ -71,6 +71,8 @@ def test_berry_bush_offers_explicit_harvest_actions() -> None:
         "Harvest Berries",
         "Pull Berry Bush",
     ]
+    bush.state["has_berries"] = False
+    assert available_actions(bush, PlayerState()) == ["Pull Berry Bush"]
     bush.active = False
     assert available_actions(bush, PlayerState()) == []
 

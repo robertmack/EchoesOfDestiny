@@ -50,6 +50,7 @@ def interaction_is_available(
     predicates = {
         None: True,
         "tree_has_branch": not bool(tree_state_data(obj.state)["branch_taken"]),
+        "bush_has_berries": bool(obj.state.get("has_berries", True)),
         "object_is_uncontained": obj.container is None,
         "stored_hoe_available": (
             player.has_hoe
@@ -80,6 +81,7 @@ def interaction_is_available(
             < int(player.bucket.capacity.get("water", 0))
             and water_uses > 0
         ),
+        "barrel_has_water": water_uses > 0,
         "porridge_ingredients": (
             player.inventory["grains"] >= 3
             and player.has_bucket

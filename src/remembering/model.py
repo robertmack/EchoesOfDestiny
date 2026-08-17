@@ -146,6 +146,7 @@ class WorldObject:
     interactions: dict[str, dict[str, object]] = field(default_factory=dict)
     capacity: dict[str, int] = field(default_factory=dict)
     nutrition: int = 0
+    condition_recovery: dict[str, float] = field(default_factory=dict)
     type_id: str = ""
     orientation: str = "E/W"
     quality: int = 100
@@ -191,6 +192,17 @@ class WorldObject:
 
 
 @dataclass(frozen=True, slots=True)
+class SpriteOverlay:
+    overlay_id: str
+    state_field: str
+    value_min: float = 0.0
+    value_max: float | None = None
+    capacity_resource: str | None = None
+    alpha_min: int = 0
+    alpha_max: int = 255
+
+
+@dataclass(frozen=True, slots=True)
 class ObjectForm:
     form_id: str
     name: str | None
@@ -206,9 +218,11 @@ class ObjectForm:
     build_cost: tuple[tuple[str, int], ...] = ()
     capacity: dict[str, int | dict[str, int]] = field(default_factory=dict)
     nutrition: int = 0
+    condition_recovery: dict[str, float] = field(default_factory=dict)
     build_duration_seconds: float = 0.0
     persistence: dict[str, PersistencePolicy] = field(default_factory=dict)
     states: tuple[str, ...] = ()
+    sprite_overlays: tuple[SpriteOverlay, ...] = ()
 
     def capacity_for(self, quality: int) -> dict[str, int]:
         if quality <= 20:
@@ -238,6 +252,7 @@ class ObjectType:
     variants: tuple[str, ...] = ()
     default_variant: str | None = None
     state_fields: tuple[str, ...] = ()
+    state_defaults: dict[str, object] = field(default_factory=dict)
     growth: dict[str, object] = field(default_factory=dict)
 
     def form_definition(
@@ -255,6 +270,21 @@ class MapDoor:
     offset: int
     width: int
     connects_to: str | None = None
+
+
+@dataclass(slots=True)
+class BoundaryObject:
+    """A full object on a grid line; edge is canonical ``north`` or ``west``."""
+
+    boundary_id: str
+    kind: str
+    column: int
+    row: int
+    edge: str
+    open: bool = False
+    locked: bool = False
+    swing: str = "counterclockwise"
+    blocks_vision: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,8 +348,12 @@ class MapDefinition:
     structures: list[MapStructure]
     objects: dict[int, WorldObject]
     tile_map: TileMap
+    boundaries: list[BoundaryObject] = field(default_factory=list)
     object_types: dict[str, ObjectType] = field(default_factory=dict)
     tile_states: dict[tuple[int, int], LevelTileState] = field(default_factory=dict)
+    tile_sprite_overlays: dict[str, tuple[SpriteOverlay, ...]] = field(
+        default_factory=dict
+    )
     cheat_memory: tuple[RoutineStep, ...] = ()
     remembered_routine: tuple[RoutineStep, ...] = ()
     build_memories: dict[str, BuildMemory] = field(default_factory=dict)
@@ -327,6 +361,39 @@ class MapDefinition:
     soil_persistence_gain: float = 1.0
     reverted_till_progress_range: tuple[float, float] = (80.0, 100.0)
     tile_persistence_modifier_range: tuple[float, float] = (1.0, 1.0)
+    characters: dict[int, CharacterState] = field(default_factory=dict)
+    controlled_character_id: int | None = None
+    character_types: dict[str, CharacterType] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SkillState:
+    level: int = 0
+    experience: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterType:
+    type_id: str
+    name: str
+    description: str
+    inherits: str | None
+    conditions: dict[str, dict[str, object]]
+    secondary_stats: dict[str, dict[str, object]]
+    skills: dict[str, dict[str, object]]
+    behavior: dict[str, object]
+
+
+@dataclass(slots=True)
+class CharacterState:
+    character_id: int
+    type_id: str
+    name: str
+    last_sleep_id: int
+    conditions: dict[str, float] = field(default_factory=dict)
+    condition_memory: dict[str, float] = field(default_factory=dict)
+    skills: dict[str, SkillState] = field(default_factory=dict)
+    used_nap_windows: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -335,8 +402,27 @@ class PlayerState:
     y: float = 120
     speed: float = 190
     inventory: Counter[str] = field(default_factory=Counter)
-    hunger: int = 35
-    energy: int = 100
+    character_id: int = 1
+    conditions: dict[str, float] = field(
+        default_factory=lambda: {
+            "trauma": 90.0,
+            "hunger": 95.0,
+            "thirst": 95.0,
+            "fatigue": 82.0,
+        }
+    )
+    condition_memory: dict[str, float] = field(
+        default_factory=lambda: {"trauma": 90.0, "hunger": 95.0, "thirst": 95.0}
+    )
+    skills: dict[str, SkillState] = field(
+        default_factory=lambda: {
+            "farming": SkillState(),
+            "crafting": SkillState(),
+            "harvesting": SkillState(),
+        }
+    )
+    last_sleep_id: int = 1
+    used_nap_windows: set[str] = field(default_factory=set)
     has_hoe: bool = False
     carrying_hoe: bool = False
     hoe_quality: int = 20
@@ -345,6 +431,24 @@ class PlayerState:
     carried_objects: list[WorldObject] = field(default_factory=list)
     meal_ready: bool = False
     achievements: set[str] = field(default_factory=set)
+
+    @property
+    def hunger(self) -> int:
+        """Compatibility view: legacy hunger represented fullness."""
+        return round(100 - self.conditions.get("hunger", 0.0))
+
+    @hunger.setter
+    def hunger(self, value: int) -> None:
+        self.conditions["hunger"] = max(0.0, min(99.0, 100.0 - float(value)))
+
+    @property
+    def energy(self) -> int:
+        """Compatibility view retained for authored quests during migration."""
+        return round(100 - self.conditions.get("fatigue", 0.0))
+
+    @energy.setter
+    def energy(self, value: int) -> None:
+        self.conditions["fatigue"] = max(0.0, min(99.0, 100.0 - float(value)))
 
     @property
     def tile_position(self) -> TilePosition:

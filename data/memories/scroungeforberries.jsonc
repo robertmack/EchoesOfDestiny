@@ -1,0 +1,799 @@
+{
+    "_schema_version": 1,
+    "name": "scroungeforberries",
+    "commands": [
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012199,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    64,
+                    80
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012323,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    66,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012355,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    58,
+                    84
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_id": 2,
+            "target_type": "table",
+            "target_point": {
+                "tilexy": [
+                    70,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012029,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    84,
+                    74
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2011979,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    92,
+                    72
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2011981,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    96,
+                    72
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_id": 2,
+            "target_type": "table",
+            "target_point": {
+                "tilexy": [
+                    70,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Gather Pebbles",
+            "quantity": 10,
+            "nearest_to_player": true
+        },
+        {
+            "action": "Gather Branches",
+            "area_bounds": {
+                "start": {
+                    "tilexy": [
+                        57,
+                        73
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                },
+                "end": {
+                    "tilexy": [
+                        68,
+                        79
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                }
+            },
+            "quantity": 10,
+            "target_areas": [
+                {
+                    "start": {
+                        "tilexy": [
+                            57,
+                            73
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    },
+                    "end": {
+                        "tilexy": [
+                            68,
+                            79
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "action": "Gather Tall Grass",
+            "area_bounds": {
+                "start": {
+                    "tilexy": [
+                        57,
+                        73
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                },
+                "end": {
+                    "tilexy": [
+                        68,
+                        81
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                }
+            },
+            "quantity": 10,
+            "target_areas": [
+                {
+                    "start": {
+                        "tilexy": [
+                            57,
+                            73
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    },
+                    "end": {
+                        "tilexy": [
+                            68,
+                            81
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "action": "Craft Crude Axe",
+            "target_id": 4,
+            "target_type": "workbench",
+            "target_point": {
+                "tilexy": [
+                    55,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_id": 2,
+            "target_type": "table",
+            "target_point": {
+                "tilexy": [
+                    70,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_id": 2,
+            "target_type": "table",
+            "target_point": {
+                "tilexy": [
+                    70,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_id": 2,
+            "target_type": "table",
+            "target_point": {
+                "tilexy": [
+                    70,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Eat Berries",
+            "target_id": 2,
+            "target_type": "table",
+            "target_point": {
+                "tilexy": [
+                    70,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012195,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    52,
+                    80
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012194,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    51,
+                    80
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Chop Trees",
+            "area_bounds": {
+                "start": {
+                    "tilexy": [
+                        37,
+                        86
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                },
+                "end": {
+                    "tilexy": [
+                        43,
+                        90
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                }
+            },
+            "quantity": 10,
+            "target_areas": [
+                {
+                    "start": {
+                        "tilexy": [
+                            37,
+                            86
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    },
+                    "end": {
+                        "tilexy": [
+                            43,
+                            90
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012461,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    49,
+                    87
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Power Nap",
+            "target_id": 1,
+            "target_type": "bed",
+            "target_point": {
+                "tilexy": [
+                    62,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Build Barrel",
+            "area_bounds": {
+                "start": {
+                    "tilexy": [
+                        74,
+                        78
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                },
+                "end": {
+                    "tilexy": [
+                        75,
+                        79
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                }
+            },
+            "quantity": 1,
+            "target_areas": [
+                {
+                    "start": {
+                        "tilexy": [
+                            74,
+                            78
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    },
+                    "end": {
+                        "tilexy": [
+                            75,
+                            79
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "action": "Chop Down Tree",
+            "target_id": 1000191,
+            "target_type": "tree",
+            "target_point": {
+                "tilexy": [
+                    87,
+                    83
+                ],
+                "subtilexy": [
+                    59.0,
+                    1.0
+                ]
+            }
+        },
+        {
+            "action": "Craft Wooden Bucket",
+            "target_id": 4,
+            "target_type": "workbench",
+            "target_point": {
+                "tilexy": [
+                    55,
+                    66
+                ],
+                "subtilexy": [
+                    0.0,
+                    0.0
+                ]
+            }
+        },
+        {
+            "action": "Fill Barrel",
+            "target_id": 2013371,
+            "target_type": "barrel",
+            "area_bounds": {
+                "start": {
+                    "tilexy": [
+                        88,
+                        86
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                },
+                "end": {
+                    "tilexy": [
+                        89,
+                        87
+                    ],
+                    "subtilexy": [
+                        0,
+                        0
+                    ]
+                }
+            },
+            "target_point": {
+                "tilexy": [
+                    74,
+                    78
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            },
+            "source_areas": [
+                {
+                    "start": {
+                        "tilexy": [
+                            88,
+                            86
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    },
+                    "end": {
+                        "tilexy": [
+                            89,
+                            87
+                        ],
+                        "subtilexy": [
+                            0,
+                            0
+                        ]
+                    }
+                }
+            ],
+            "target_build_memory": "barrel:74:78"
+        },
+        {
+            "action": "Drink from Barrel",
+            "target_id": 2013371,
+            "target_type": "barrel",
+            "target_point": {
+                "tilexy": [
+                    74,
+                    78
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            },
+            "target_build_memory": "barrel:74:78"
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2011939,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    66,
+                    73
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012266,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    59,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012380,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    59,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012460,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    61,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012268,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    67,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012269,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    69,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012390,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    82,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012391,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    83,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012466,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012536,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012535,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    85,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012560,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    91
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012609,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    92
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012693,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    91,
+                    94
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Gather",
+            "target_id": 2012649,
+            "target_type": "grass",
+            "target_point": {
+                "tilexy": [
+                    90,
+                    93
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        }
+    ]
+}

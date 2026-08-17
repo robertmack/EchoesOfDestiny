@@ -8,6 +8,8 @@ from remembering.game import (
     AreaTarget,
     DAY_FADE_DURATION_SECONDS,
     Game,
+    MAP_VIEWPORT,
+    MORNING_OPENING_FADE_SECONDS,
     PendingJob,
     area_commands_for_category,
     available_area_commands,
@@ -17,6 +19,7 @@ from remembering.game import (
     compact_label,
     object_map_label,
     object_action_menu_options,
+    object_job_duration_seconds,
     planting_duration_seconds,
     random_within_tile_anchor,
     sprite_size_within_footprint,
@@ -34,6 +37,7 @@ from remembering.model import (
     tree_state_data,
 )
 from remembering.tiles import TileKind
+from remembering.ui_layout import RIGHT_DOCK_RECT
 from remembering.world import (
     DEFAULT_CURRENT_LEVEL_PATH,
     create_world,
@@ -41,6 +45,29 @@ from remembering.world import (
     load_object_types,
     save_persistent_objects,
 )
+
+
+def test_crossing_an_unlocked_closed_door_stops_once_and_opens_it() -> None:
+    game = Game(fullscreen=False)
+    door = next(
+        boundary
+        for boundary in game.map.boundaries
+        if boundary.boundary_id == "bedroom_door_1"
+    )
+    start = game.map.tile_map.tile_center(66, 64)
+    destination = game.map.tile_map.tile_center(67, 64)
+    game.player.x, game.player.y = start
+    game.navigation_path = [destination]
+    game.walk_target = destination
+
+    assert door.open is False
+    assert door.locked is False
+    assert game.move_along_path(0.05)
+    assert door.open is True
+    assert (game.player.x, game.player.y) == start
+
+    assert game.move_along_path(1.0)
+    assert (game.player.x, game.player.y) != start
 
 
 def current_level_copy(tmp_path):
@@ -154,6 +181,33 @@ def test_shallow_water_context_menu_gathers_with_empty_bucket() -> None:
     ]
 
 
+def test_drinking_from_terrain_is_recorded_and_replayed() -> None:
+    game = Game(fullscreen=False)
+    target = game.water_sources_in_bounds(
+        (0, 0, game.map.width, game.map.height)
+    )[0]
+    game.player.x, game.player.y = target
+    game.player.conditions["thirst"] = 50
+
+    assert game.queue_terrain_drink(target, record=True) is True
+    assert game.day.today_routine[-1] == RoutineStep(
+        None, "Drink Water", target_point=target
+    )
+
+    game.cancel_current_command()
+    game.day.remembered_routine = [
+        RoutineStep(None, "Drink Water", target_point=target)
+    ]
+    game.day.replay_index = 0
+    game.day.mode = Mode.REPLAY
+    game.simulation_paused = False
+    game.update(0.05)
+    game.update(0.05)
+
+    assert game.day.replay_index == 1
+    assert game.player.conditions["thirst"] < 50
+
+
 def test_ruined_bucket_cannot_start_or_repeat_water_gathering() -> None:
     game = Game(fullscreen=False)
     bucket = game.create_carried_object("bucket", quality=20)
@@ -187,6 +241,7 @@ def test_area_commands_are_grouped_into_submenus() -> None:
         "Gather Branches",
         "Gather Seeds",
         "Gather Tall Grass",
+        "Harvest Berries",
     ]
     assert area_commands_for_category(player, "Farm") == ["Tend Crops", "Harvest Wheat"]
     assert area_commands_for_category(player, "Build") == [
@@ -210,6 +265,63 @@ def test_chop_trees_area_command_requires_axe_and_queues_tree_actions() -> None:
     assert targets
     assert all(target.action == "Chop Down Tree" for target in targets)
     assert all(game.objects[target.target_id].kind is ObjectKind.TREE for target in targets)
+
+
+def test_harvest_berries_area_command_only_targets_bushes_with_berries() -> None:
+    game = Game(fullscreen=False)
+    bushes = [
+        obj
+        for obj in game.objects.values()
+        if obj.type_id == "bush" and obj.active
+    ]
+    assert len(bushes) >= 2
+    bushes[0].state["has_berries"] = False
+
+    targets = game.build_area_targets(
+        "Harvest Berries", (0, 0, game.map.width, game.map.height)
+    )
+
+    assert targets
+    assert all(target.action == "Harvest Berries" for target in targets)
+    assert bushes[0].object_id not in {target.target_id for target in targets}
+    assert all(
+        game.objects[target.target_id].state["has_berries"]
+        for target in targets
+        if target.target_id is not None
+    )
+
+
+def test_basket_makes_berry_harvesting_six_times_faster() -> None:
+    game = Game(fullscreen=False)
+    bush = game.object_of_type("bush")
+
+    base = object_job_duration_seconds("Harvest Berries", bush, False)
+    with_basket = object_job_duration_seconds("Harvest Berries", bush, True)
+
+    assert base == pytest.approx(3.0)
+    assert with_basket == pytest.approx(0.5)
+    assert base / with_basket == pytest.approx(6.0)
+
+
+def test_timed_work_reports_progress_and_thought_milestones(tmp_path) -> None:
+    game = Game(fullscreen=False, persistence_path=current_level_copy(tmp_path))
+    bush = game.object_of_type("bush")
+    duration = object_job_duration_seconds("Harvest Berries", bush, False)
+    point = (game.player.x, game.player.y)
+    game.pending_job = PendingJob(bush.object_id, "Harvest Berries", point)
+
+    expected = (
+        (0.0, "Harvest Berries"),
+        (0.25, "Harvest Berries — 1/4 done"),
+        (0.5, "Harvest Berries — 1/2 done"),
+        (0.75, "Harvest Berries — almost done"),
+    )
+    for progress, thought in expected:
+        game.job_timer = duration * progress
+        action, actual_progress = game.active_work_progress()
+        assert action == "Harvest Berries"
+        assert actual_progress == pytest.approx(progress)
+        assert game.work_thought_text() == thought
 
 
 def test_barrel_build_cost_comes_from_object_catalog_and_water_transfers() -> None:
@@ -248,16 +360,53 @@ def test_barrel_build_cost_comes_from_object_catalog_and_water_transfers() -> No
     assert barrel.state["sprite_state"] == "empty"
 
 
-def test_w_cheat_adds_one_wood_silently() -> None:
+@pytest.mark.parametrize(
+    ("key", "resource"),
+    [
+        (pygame.K_w, "wood"),
+        (pygame.K_f, "fiber"),
+        (pygame.K_b, "branch"),
+        (pygame.K_p, "pebble"),
+        (pygame.K_s, "seed"),
+        (pygame.K_g, "grains"),
+    ],
+)
+def test_ctrl_resource_cheats_add_one_resource_silently(
+    key: int, resource: str
+) -> None:
     game = Game(fullscreen=False)
-    starting_wood = game.player.inventory["wood"]
+    starting_quantity = game.player.inventory[resource]
     starting_messages = list(game.messages)
 
-    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_w))
+    pygame.event.post(
+        pygame.event.Event(
+            pygame.KEYDOWN,
+            key=key,
+            mod=pygame.KMOD_CTRL,
+            unicode="",
+        )
+    )
     game.handle_events()
 
-    assert game.player.inventory["wood"] == starting_wood + 1
+    assert game.player.inventory[resource] == starting_quantity + 1
     assert game.messages == starting_messages
+
+
+def test_w_without_ctrl_does_not_add_wood() -> None:
+    game = Game(fullscreen=False)
+    starting_wood = game.player.inventory["wood"]
+
+    pygame.event.post(
+        pygame.event.Event(
+            pygame.KEYDOWN,
+            key=pygame.K_w,
+            mod=pygame.KMOD_NONE,
+            unicode="w",
+        )
+    )
+    game.handle_events()
+
+    assert game.player.inventory["wood"] == starting_wood
 
 
 def test_f6_reloads_sprites_without_reloading_the_map(monkeypatch) -> None:
@@ -834,7 +983,7 @@ def test_sleep_fades_out_resets_persistent_level_and_fades_in(tmp_path) -> None:
     assert game.map.tile_states[(permanent_column, permanent_row)].crop is None
     assert not any(prop.startswith("crop:") for prop in restored_permanent.properties)
 
-    game.update(DAY_FADE_DURATION_SECONDS)
+    game.update(MORNING_OPENING_FADE_SECONDS)
     assert game.day_transition_phase is None
     assert game.day_transition_progress == 0.0
 
@@ -1212,8 +1361,8 @@ def test_build_path_points_include_start_and_end() -> None:
 def test_screen_to_world_ignores_panel_clicks() -> None:
     game = Game(fullscreen=False)
     assert game.screen_to_world((10, 80)) is None
-    assert game.screen_to_world((1000, 80)) is None
-    assert game.screen_to_world((220, 80)) is not None
+    assert game.screen_to_world((RIGHT_DOCK_RECT.x + 10, 80)) is None
+    assert game.screen_to_world((MAP_VIEWPORT.centerx, MAP_VIEWPORT.top + 40)) is not None
 
 
 def test_tall_grass_stays_outside_buildings() -> None:
@@ -1461,6 +1610,34 @@ def test_area_command_quantity_selector_limits_nearest_targets(monkeypatch) -> N
     assert remembered.action == "Gather Pebbles"
     assert remembered.area_bounds is not None
     assert remembered.quantity == 2
+
+
+def test_clicking_character_chooses_nearest_targets_for_farm_area_command(
+    monkeypatch,
+) -> None:
+    game = Game(fullscreen=False)
+    game.area_command_quantity = 2
+    targets = [
+        AreaTarget("Tend Plant", (game.player.x + distance, game.player.y))
+        for distance in (30, 10, 20)
+    ]
+    monkeypatch.setattr(game, "build_area_targets", lambda command, bounds: targets)
+    game.active_command = "Tend Crops"
+    game.command_drag_start = (game.player.x, game.player.y)
+
+    game.finish_command_drag(
+        game.camera.world_to_screen((game.player.x, game.player.y))
+    )
+
+    assert [target.point for target in game.area_targets] == [
+        (game.player.x + 10, game.player.y),
+        (game.player.x + 20, game.player.y),
+    ]
+    remembered = game.day.today_routine[-1]
+    assert remembered.action == "Tend Crops"
+    assert remembered.quantity == 2
+    assert remembered.nearest_to_player is True
+    assert remembered.area_bounds is None
 
 
 def test_replay_reissues_an_area_command_against_the_current_world() -> None:

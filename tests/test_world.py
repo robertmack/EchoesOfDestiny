@@ -6,7 +6,7 @@ import pytest
 from remembering.jsonc import loads_jsonc
 
 from remembering.model import LevelTileState, ObjectKind, RoomQuality, RoutineStep
-from remembering.tiles import TRAVERSABLE_TILE_KINDS, TileEdge, TileKind
+from remembering.tiles import TRAVERSABLE_TILE_KINDS, Tile, TileEdge, TileKind, TileMap
 from remembering.world import (
     DEFAULT_CURRENT_LEVEL_PATH,
     DEFAULT_MAP_PATH,
@@ -24,7 +24,46 @@ from remembering.world import (
     structure_wall_rects,
     terrain_blocks_point,
     _spread_spawn_influence,
+    _apply_boundaries,
+    _boundary_from_entry,
 )
+from remembering.sprites import overlay_alpha
+from remembering.model import SpriteOverlay
+
+
+def test_boundary_edges_normalize_to_shared_north_west_addresses() -> None:
+    east = _boundary_from_entry({"id": "a", "type": "fence", "x": 2, "y": 3, "edge": "east"})
+    south = _boundary_from_entry({"id": "b", "type": "wall", "x": 4, "y": 5, "edge": "south"})
+
+    assert (east.column, east.row, east.edge) == (3, 3, "west")
+    assert (south.column, south.row, south.edge) == (4, 6, "north")
+
+
+def test_boundary_door_controls_both_sides_of_tile_edge() -> None:
+    tile_map = TileMap(2, 1, 64, [Tile(TileKind.GRASSLAND), Tile(TileKind.GRASSLAND)])
+    closed = _boundary_from_entry({"id": "door", "type": "door", "x": 0, "y": 0, "edge": "east", "locked": True})
+    _apply_boundaries(tile_map, [closed])
+    assert not tile_map.tile_at(0, 0).passable[TileEdge.EAST]
+    assert not tile_map.tile_at(1, 0).passable[TileEdge.WEST]
+
+    opened = _boundary_from_entry({"id": "door", "type": "door", "x": 0, "y": 0, "edge": "east", "open": True})
+    _apply_boundaries(tile_map, [opened])
+    assert tile_map.tile_at(0, 0).passable[TileEdge.EAST]
+    assert tile_map.tile_at(1, 0).passable[TileEdge.WEST]
+
+
+def test_state_driven_sprite_overlay_alpha_supports_ranges_capacity_and_presence() -> None:
+    progress = SpriteOverlay("tilled", "till_percentage", value_max=100)
+    assert overlay_alpha(progress, {"till_percentage": 0}) == 0
+    assert overlay_alpha(progress, {"till_percentage": 40}) == 102
+    assert overlay_alpha(progress, {"till_percentage": 100}) == 255
+
+    capacity = SpriteOverlay("water", "water_uses", capacity_resource="water")
+    assert overlay_alpha(capacity, {"water_uses": 15}, {"water": 30}) == 128
+
+    presence = SpriteOverlay("apples", "has_apples")
+    assert overlay_alpha(presence, {"has_apples": False}) == 0
+    assert overlay_alpha(presence, {"has_apples": True}) == 255
 
 
 def test_memory_file_round_trip_uses_tile_coordinates(tmp_path) -> None:
@@ -41,9 +80,9 @@ def test_memory_file_round_trip_uses_tile_coordinates(tmp_path) -> None:
     path = save_memory_file(
         "my routine", routine, tile_size=64, directory=tmp_path
     )
-    loaded = load_memory_file("my routine.memory", tile_size=64, directory=tmp_path)
+    loaded = load_memory_file("my routine.jsonc", tile_size=64, directory=tmp_path)
 
-    assert path == tmp_path / "my routine.memory"
+    assert path == tmp_path / "my routine.jsonc"
     assert loaded == tuple(routine)
     assert json.loads(path.read_text(encoding="utf-8"))["commands"][0][
         "area_bounds"
@@ -71,6 +110,22 @@ def test_default_map_loads_authored_structures_and_objects() -> None:
     assert all(room.doors for room in rooms)
     assert all(room.quality in RoomQuality for room in rooms)
     assert all(room.display_color is not None and len(room.display_color) == 3 for room in rooms)
+
+
+def test_default_map_has_visible_closed_boundaries_at_every_doorway() -> None:
+    map_definition = load_map(persistence_path=None)
+    doors = {
+        (boundary.column, boundary.row, boundary.edge)
+        for boundary in map_definition.boundaries
+        if boundary.kind == "door" and not boundary.open and not boundary.locked
+    }
+
+    assert doors == {
+        (67, 64, "west"),
+        (67, 69, "west"),
+        (69, 72, "north"),
+        (55, 69, "north"),
+    }
 
 
 def test_bed_uses_authored_instance_coordinates() -> None:
@@ -421,6 +476,21 @@ def test_orientation_rotates_rectangular_footprint_and_quality_is_derived(tmp_pa
 
     assert (rotated_bed.width, rotated_bed.height) == (64, 128)
     assert rotated_bed.quality_stage == "ruined"
+
+
+def test_four_direction_orientation_preserves_direction_and_footprint(tmp_path) -> None:
+    data = loads_jsonc(DEFAULT_MAP_PATH.read_text(encoding="utf-8"))
+    bed = next(instance for instance in data["objects"] if instance["type"] == "bed")
+    bed["orientation"] = "S"
+    map_path = tmp_path / "south.json"
+    map_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = next(
+        obj for obj in load_map(map_path, persistence_path=None).objects.values()
+        if obj.type_id == "bed"
+    )
+    assert loaded.orientation == "S"
+    assert (loaded.width, loaded.height) == (64, 128)
 
 
 def test_persistent_objects_round_trip_separately_from_map(tmp_path) -> None:

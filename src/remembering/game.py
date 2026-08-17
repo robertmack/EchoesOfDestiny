@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 import math
 import json
 import random
 import sys
-from dataclasses import dataclass, replace
+from datetime import datetime
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pygame
@@ -19,7 +21,7 @@ from remembering.coordinates import (
 from remembering.navigation import find_tile_path, find_tile_path_to_any
 from remembering.model import (
     BuildMemory,
-    DAY_LENGTH_MINUTES,
+    BoundaryObject,
     START_OF_DAY_MINUTES,
     DayState,
     LevelTileState,
@@ -37,9 +39,49 @@ from remembering.model import (
 from remembering.rules import (
     available_actions,
 )
-from remembering.sprites import ObjectSpriteCatalog
+from remembering.quests import QuestLoadError, QuestManager, load_quest_state
+from remembering.sprites import (
+    BoundarySpriteCatalog,
+    ObjectSpriteCatalog,
+    TileSpriteCatalog,
+    overlay_alpha,
+)
+from remembering.stats import (
+    CONDITION_IDS,
+    CONDITION_LABELS,
+    apply_condition_effects,
+    condition_color,
+    condition_descriptor,
+    gain_skill_experience,
+    harvesting_speed_multiplier,
+    healing_rate,
+    critical_trauma_visible,
+    learn_dawn_conditions,
+    movement_speed_multiplier,
+    task_speed_multiplier,
+)
 from remembering.tiles import Tile, TileEdge, TileKind
+from remembering.ui_layout import (
+    COMMAND_EDITOR_MAP_RECT,
+    COMMAND_EDITOR_MESSAGES_RECT,
+    COMMAND_EDITOR_RECT,
+    LEFT_DOCK_RECT,
+    LEFT_COMMAND_RECT,
+    LEFT_MESSAGE_HISTORY_RECT,
+    LEFT_SELECTION_RECT,
+    MAP_RECT,
+    MESSAGE_BAR_RECT,
+    PlayerDockLayout,
+    InventoryPage,
+    RELOAD_BUTTON_RECT,
+    RIGHT_DOCK_RECT,
+    TIMELINE_HEIGHT_PX,
+    WINDOW_SIZE_PX,
+    WINDOW_TITLE,
+    player_dock_layout,
+)
 from remembering.world import (
+    DEFAULT_MEMORY_DIR,
     DEFAULT_CURRENT_LEVEL_PATH,
     advance_level_tile_states,
     initialize_current_level_from_map,
@@ -96,6 +138,7 @@ def build_ground_context_menu_options(
     if player.has_bucket:
         options.append("Drop Bucket")
     if tile.kind in {TileKind.SHALLOW_WATER, TileKind.POND}:
+        options.append("Drink Water")
         if player.bucket is not None and int(player.bucket.capacity.get("water", 0)) <= 0:
             options.append(RUINED_BUCKET_REQUIRED)
         else:
@@ -302,15 +345,25 @@ def build_path_points(start: tuple[float, float], end: tuple[float, float], step
         points.append((int(x), int(y)))
     return points
 
-WIDTH, HEIGHT = 1050, 686
-TOP_BAR_HEIGHT = 46
-SIDEBAR_WIDTH = 190
-RIGHT_SIDEBAR_WIDTH = 220
+WIDTH, HEIGHT = WINDOW_SIZE_PX
+TOP_BAR_HEIGHT = TIMELINE_HEIGHT_PX
+MESSAGE_BAR_HEIGHT = MESSAGE_BAR_RECT.height
+MAP_SIZE = MAP_RECT.width
+SIDEBAR_WIDTH = LEFT_DOCK_RECT.width
+RIGHT_SIDEBAR_WIDTH = RIGHT_DOCK_RECT.width
 PLAYER_RADIUS = 14
 INTERACTION_DISTANCE = 45
 GAME_MINUTES_PER_REAL_SECOND = 1.0
 FIXED_SIMULATION_TICK_SECONDS = 0.05
 DAY_FADE_DURATION_SECONDS = 0.75
+MORNING_OPENING_FADE_SECONDS = 5.0
+INTRO_PAGE_SECONDS = 6.0
+INTRO_IMAGE_PATHS = tuple(
+    Path(__file__).resolve().parents[1] / "assets" / "images" / f"opening_pg{page}.png"
+    for page in range(1, 5)
+)
+REWIND_START_SAMPLES_PER_SECOND = 12.0
+REWIND_ACCELERATION_SAMPLES_PER_SECOND_SQUARED = 90.0
 EMPTY_BUCKET_REQUIRED = "Gather Water (empty bucket required)"
 RUINED_BUCKET_REQUIRED = "Gather Water (bucket is ruined)"
 TIME_SPEED_OPTIONS = (
@@ -327,19 +380,63 @@ AREA_COMMAND_TYPES = {
     "Gather Branches": {"branch"},
     "Gather Seeds": {"wild_plant"},
     "Gather Tall Grass": {"grass"},
+    "Harvest Berries": {"bush"},
 }
 AREA_COMMANDS = list(AREA_COMMAND_TYPES)
+NEAREST_AREA_COMMANDS = {
+    *AREA_COMMAND_TYPES,
+    "Chop Trees",
+    "Till Grassland",
+    "Plant Wheat",
+    "Water Crops",
+    "Tend Crops",
+    "Harvest Wheat",
+}
 BUILD_COMMAND_TYPES = {
     "Build Barrel": "barrel",
     "Build Cupboard": "cupboard",
 }
 AREA_COMMAND_CATEGORIES = ("Gather", "Farm", "Build")
-MAP_LEFT = SIDEBAR_WIDTH
-MAP_RIGHT = MAP_LEFT + 640
-MAP_TOP = TOP_BAR_HEIGHT
-MAP_BOTTOM = MAP_TOP + 640
-RELOAD_BUTTON = pygame.Rect(WIDTH - RIGHT_SIDEBAR_WIDTH + 12, HEIGHT - 46, RIGHT_SIDEBAR_WIDTH - 24, 32)
-MAP_VIEWPORT = pygame.Rect(MAP_LEFT, MAP_TOP, MAP_RIGHT - MAP_LEFT, MAP_BOTTOM - MAP_TOP)
+RESOURCE_CHEAT_KEYS = {
+    pygame.K_w: "wood",
+    pygame.K_f: "fiber",
+    pygame.K_b: "branch",
+    pygame.K_p: "pebble",
+    pygame.K_s: "seed",
+    pygame.K_g: "grains",
+}
+MAX_MESSAGE_HISTORY = 500
+CONDITION_THOUGHT_DISPLAY_SECONDS = 4.0
+CONDITION_THOUGHT_GAP_SECONDS = 8.0
+CONDITION_COMPLAINTS = {
+    "trauma": (
+        (90, "I can barely move. Everything hurts."),
+        (70, "Every step hurts."),
+        (50, "I'm hurt."),
+    ),
+    "hunger": (
+        (90, "I'm starving."),
+        (70, "I need to find something to eat."),
+        (50, "I'm getting hungry."),
+    ),
+    "thirst": (
+        (90, "I desperately need water."),
+        (70, "I'm so thirsty."),
+        (50, "I could use a drink."),
+    ),
+    "fatigue": (
+        (90, "I can barely keep my eyes open."),
+        (70, "I need to rest soon."),
+        (50, "I'm getting tired."),
+    ),
+}
+MAP_LEFT = MAP_RECT.left
+MAP_RIGHT = MAP_RECT.right
+MAP_TOP = MAP_RECT.top
+MAP_BOTTOM = MAP_RECT.bottom
+MESSAGE_BAR = MESSAGE_BAR_RECT
+RELOAD_BUTTON = RELOAD_BUTTON_RECT
+MAP_VIEWPORT = MAP_RECT
 
 
 def tilling_duration_seconds(_hoe_quality: int) -> float:
@@ -370,6 +467,15 @@ class PendingJob:
     action: str
     interaction_point: tuple[float, float] | None = None
     advances_replay: bool = True
+
+
+@dataclass(slots=True)
+class DayPlanActivity:
+    kind: str
+    label: str
+    macro_name: str | None = None
+    scheduled_minutes: int | None = None
+    children: list[DayPlanActivity] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -422,7 +528,8 @@ def area_commands_for_category(player: PlayerState, category: str) -> list[str]:
         return [
             command
             for command in commands
-            if command.startswith("Gather ") or command == "Chop Trees"
+            if command.startswith("Gather ")
+            or command in {"Harvest Berries", "Chop Trees"}
         ]
     if category == "Farm":
         return [
@@ -441,11 +548,12 @@ class Game:
         *,
         fullscreen: bool = True,
         persistence_path: Path = DEFAULT_CURRENT_LEVEL_PATH,
+        memory_directory: Path = DEFAULT_MEMORY_DIR,
     ) -> None:
         pygame.init()
         display_flags = pygame.SCALED if fullscreen else pygame.HIDDEN
         pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
-        pygame.display.set_caption("Remembering — Python Prototype v0.1")
+        pygame.display.set_caption(WINDOW_TITLE)
         self.screen = pygame.display.get_surface()
         if fullscreen:
             pygame.display.toggle_fullscreen()
@@ -453,9 +561,19 @@ class Game:
         self.font = pygame.font.Font(None, 25)
         self.small_font = pygame.font.Font(None, 20)
         self.title_font = pygame.font.Font(None, 42)
+        self.wake_fonts = {
+            "plain": pygame.font.Font(None, 32),
+            "bold": pygame.font.Font(None, 34),
+            "italic": pygame.font.Font(None, 34),
+        }
+        self.wake_fonts["bold"].set_bold(True)
+        self.wake_fonts["italic"].set_italic(True)
         self.object_sprites = ObjectSpriteCatalog()
+        self.tile_sprites = TileSpriteCatalog()
+        self.boundary_sprites = BoundarySpriteCatalog()
         self.day = DayState(mode=Mode.DIRECT)
         self.persistence_path = persistence_path
+        self.memory_directory = memory_directory
         initialize_current_level_from_map(current_level_path=self.persistence_path)
         self.map = load_map(
             persistence_path=self.persistence_path,
@@ -471,10 +589,28 @@ class Game:
         self.interaction_distance = INTERACTION_DISTANCE * self.world_scale
         spawn_x, spawn_y = self.player_spawn()
         self.player = PlayerState(x=spawn_x, y=spawn_y)
+        character = self.map.characters.get(self.map.controlled_character_id or -1)
+        if character is not None:
+            self.player.character_id = character.character_id
+            self.player.conditions = dict(character.conditions)
+            self.player.condition_memory = dict(character.condition_memory)
+            self.player.skills = character.skills
+            self.player.last_sleep_id = character.last_sleep_id
+            self.player.used_nap_windows = set(character.used_nap_windows)
+            sleep_object = self.objects[character.last_sleep_id]
+            self.player.conditions["fatigue"] = max(
+                0.0, min(99.0, 100.0 - sleep_object.quality)
+            )
         self.player.speed *= self.world_scale
         self.player.carried_objects = [
             obj for obj in self.objects.values() if obj.container == "player"
         ]
+        self.quests = QuestManager.from_file()
+        try:
+            self.quests.restore_state(load_quest_state(self.persistence_path))
+        except QuestLoadError as exc:
+            self.messages = [f"Could not restore quests: {exc}"]
+        self.quests.record_start_day(self.player.conditions)
         self.storage_memories = self.load_storage_memories()
         self.camera = Camera(
             MAP_LEFT,
@@ -515,6 +651,9 @@ class Game:
         self.pending_failed_memory_thought = "Why did I come here?"
         self.thought_bubble_text: str | None = None
         self.thought_bubble_timer = 0.0
+        self.thought_bubble_source: str | None = None
+        self.condition_thought_cooldown = 2.0
+        self.condition_thought_index = 0
         self.walk_target: tuple[float, float] | None = None
         self.path_target: tuple[float, float] | None = None
         self.navigation_path: list[tuple[float, float]] = []
@@ -523,9 +662,12 @@ class Game:
         self.context_menu_options: list[str] = []
         self.context_menu_pos: tuple[int, int] | None = None
         self.context_ground_target: tuple[float, float] | None = None
+        self.context_inventory_item_id: int | None = None
+        self.context_boundary_id: str | None = None
         self.camera_dragging = False
         self.camera_drag_position: tuple[int, int] | None = None
         self.messages: list[str] = ["Day 1 begins in Direct Control. Click an object to begin."]
+        self.message_scroll_offset = 0
         self.running = True
         self.menu_index = 0
         self.job_timer = 0.0
@@ -535,9 +677,45 @@ class Game:
         self.time_speed = 1.0
         self.simulation_paused = False
         self.pause_button = pygame.Rect(0, 0, 0, 0)
-        self.time_speed_buttons: list[tuple[pygame.Rect, float]] = []
+        self.speed_down_button = pygame.Rect(0, 0, 0, 0)
+        self.speed_display = pygame.Rect(0, 0, 0, 0)
+        self.speed_up_button = pygame.Rect(0, 0, 0, 0)
+        self.step_button = pygame.Rect(0, 0, 0, 0)
+        self.inventory_page = InventoryPage.INVENTORY
+        self.equipment_collapsed = False
+        self.player_info_tab_buttons: list[
+            tuple[pygame.Rect, InventoryPage]
+        ] = []
+        self.inventory_food_buttons: list[tuple[pygame.Rect, WorldObject]] = []
+        self.macro_buttons: list[tuple[pygame.Rect, str]] = []
+        self.macro_command_buttons: list[tuple[pygame.Rect, str]] = []
+        self.macro_recording = False
+        self.macro_record_start_index = 0
+        self.macro_previous_today_routine: list[RoutineStep] | None = None
+        self.equipment_toggle_button = pygame.Rect(0, 0, 0, 0)
+        self.single_step_active = False
+        self.single_step_command_started = False
         self.day_transition_phase: str | None = None
         self.day_transition_progress = 0.0
+        self.day_transition_prepared = False
+        self.day_position_history: list[tuple[float, float]] = [
+            (self.player.x, self.player.y)
+        ]
+        self.rewind_cursor = 0.0
+        self.rewind_speed = REWIND_START_SAMPLES_PER_SECOND
+        self.rewind_flashing_objects: set[int] = set()
+        self.rewind_flashing_tiles: set[tuple[int, int]] = set()
+        self.rewind_checkpoints: list[
+            tuple[int, str, dict[str, object]]
+        ] = []
+        self.rewind_checkpoint_index = -1
+        self.rewind_persistent_objects: dict[int, WorldObject] = {}
+        self.rewind_persistent_tiles: dict[
+            tuple[int, int], tuple[TileKind, tuple[str, ...], LevelTileState | None]
+        ] = {}
+        self.dawn_transition_state: tuple[object, ...] | None = None
+        self.dawn_object_signatures = self.object_persistence_signatures()
+        self.dawn_tile_signatures = self.tile_persistence_signatures()
         self.replay_outcome = "expand"
         self.record_routine_commands = True
         self.auto_cheat_memory = False
@@ -551,8 +729,22 @@ class Game:
         self.memory_edit_field: str | None = None
         self.memory_edit_buffer = ""
         self.memory_editor_previous_pause = False
+        self.memory_browser_open = False
+        self.memory_browser_rows: list[tuple[pygame.Rect, str]] = []
+        self.memory_favorite_buttons: list[tuple[pygame.Rect, str]] = []
+        self.memory_favorites = self.load_memory_favorites()
+        self.running_command_set_name: str | None = None
+        self._editor_camera_restore: tuple[float, float] | None = None
+        self.day_plan: list[DayPlanActivity] = [
+            DayPlanActivity("explore", "Explore"),
+            DayPlanActivity("sleep", "Sleep", scheduled_minutes=23 * 60),
+        ]
+        self.day_plan_rows: list[tuple[pygame.Rect, int]] = []
+        self.day_plan_buttons: list[tuple[pygame.Rect, str, int | None]] = []
+        self.selected_conditional_index: int | None = None
 
     def run(self) -> None:
+        self.play_intro()
         while self.running:
             dt = self.clock.tick(60) / 1000
             self.handle_events()
@@ -564,15 +756,68 @@ class Game:
             self.draw()
         pygame.quit()
 
+    def play_intro(self) -> None:
+        """Show the opening pages before entering the normal game loop."""
+        pages = [pygame.image.load(path).convert() for path in INTRO_IMAGE_PATHS]
+        page_index = 0
+        elapsed = 0.0
+
+        while self.running and page_index < len(pages):
+            elapsed += self.clock.tick(60) / 1000
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    return
+                if event.type != pygame.KEYDOWN:
+                    continue
+                if event.key == pygame.K_ESCAPE:
+                    return
+                if event.key == pygame.K_SPACE:
+                    page_index += 1
+                    elapsed = 0.0
+
+            if elapsed >= INTRO_PAGE_SECONDS:
+                page_index += 1
+                elapsed = 0.0
+            if page_index >= len(pages):
+                return
+
+            page = pages[page_index]
+            scale = min(WIDTH / page.get_width(), HEIGHT / page.get_height())
+            size = (
+                max(1, round(page.get_width() * scale)),
+                max(1, round(page.get_height() * scale)),
+            )
+            shown_page = pygame.transform.smoothscale(page, size)
+            self.screen.fill((0, 0, 0))
+            self.screen.blit(shown_page, shown_page.get_rect(center=self.screen.get_rect().center))
+            pygame.display.flip()
+
     def handle_events(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-            elif self.day_transition_phase is not None:
+            elif (
+                event.type == pygame.KEYDOWN
+                and event.key == pygame.K_q
+                and getattr(event, "mod", pygame.key.get_mods()) & pygame.KMOD_CTRL
+            ):
+                self.running = False
+            elif (
+                self.day_transition_phase == "fade_in"
+                and event.type == pygame.KEYDOWN
+            ):
+                self.day_transition_phase = None
+                self.day_transition_progress = 0.0
+            elif self.day_transition_phase not in {None, "planner"}:
                 continue
             elif event.type == pygame.MOUSEWHEEL:
-                mouse_pos = pygame.mouse.get_pos()
-                if MAP_VIEWPORT.collidepoint(mouse_pos):
+                mouse_pos = getattr(event, "pos", pygame.mouse.get_pos())
+                if LEFT_MESSAGE_HISTORY_RECT.collidepoint(mouse_pos):
+                    self.message_scroll_offset = max(
+                        0, self.message_scroll_offset + event.y * 3
+                    )
+                elif MAP_VIEWPORT.collidepoint(mouse_pos):
                     self.camera.set_zoom(
                         self.camera.zoom * (1.12**event.y),
                         mouse_pos,
@@ -597,6 +842,7 @@ class Game:
                 if MAP_VIEWPORT.collidepoint(event.pos):
                     self.command_drag_current = self.camera.screen_to_world(event.pos)
             elif event.type == pygame.KEYDOWN:
+                modifiers = getattr(event, "mod", pygame.key.get_mods())
                 number_keys = {
                     pygame.K_1: 0,
                     pygame.K_KP1: 0,
@@ -613,10 +859,17 @@ class Game:
                 }
                 action_index = number_keys.get(event.key)
 
-                if self.adjusting_memory:
+                if event.key == pygame.K_h and modifiers & pygame.KMOD_CTRL:
+                    self.clear_negative_conditions()
+                elif self.adjusting_memory:
                     self.handle_memory_editor_key(
-                        event.key, pygame.key.get_mods(), event.unicode
+                        event.key, modifiers, event.unicode
                     )
+                elif (
+                    modifiers & pygame.KMOD_CTRL
+                    and event.key in RESOURCE_CHEAT_KEYS
+                ):
+                    self.player.inventory[RESOURCE_CHEAT_KEYS[event.key]] += 1
                 elif event.key == pygame.K_c:
                     self.open_memory_editor()
                 elif event.key == pygame.K_F5:
@@ -631,18 +884,26 @@ class Game:
                     event.key == pygame.K_p
                     and self.day.mode is not Mode.MORNING
                 ):
-                    self.simulation_paused = not self.simulation_paused
-                    self.log("Paused." if self.simulation_paused else "Playing.")
-                elif event.key == pygame.K_w:
-                    self.player.inventory["wood"] += 1
+                    self.toggle_simulation_pause()
+                elif event.key in {
+                    pygame.K_PLUS,
+                    pygame.K_EQUALS,
+                    pygame.K_KP_PLUS,
+                }:
+                    self.adjust_time_speed(1)
+                elif event.key in {pygame.K_MINUS, pygame.K_KP_MINUS}:
+                    self.adjust_time_speed(-1)
                 elif event.key == pygame.K_b:
                     if not self.player.has_bucket:
                         self.create_carried_object("bucket")
+                elif event.key == pygame.K_e:
+                    self.toggle_equipment_panel()
                 elif self.context_menu_options:
                     if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
                         self.context_menu_options = []
                         self.context_menu_pos = None
                         self.context_ground_target = None
+                        self.context_inventory_item_id = None
                     elif action_index is not None:
                         self.activate_context_option(action_index)
                 elif event.key == pygame.K_ESCAPE:
@@ -650,8 +911,6 @@ class Game:
                         self.running = False
                     else:
                         self.cancel_current_command()
-                elif event.key == pygame.K_q and pygame.key.get_mods() & pygame.KMOD_CTRL:
-                    self.running = False
                 elif self.day.mode is Mode.MORNING:
                     self.handle_morning_key(event.key)
                 elif self.day.mode is Mode.DIRECT and self.selected_id and action_index is not None:
@@ -661,20 +920,65 @@ class Game:
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if self.adjusting_memory and event.button == 1:
                     self.handle_memory_editor_click(event.pos)
+                elif event.button == 3 and self.handle_inventory_food_click(
+                    event.pos
+                ):
+                    pass
                 elif event.button == 2 and MAP_VIEWPORT.collidepoint(event.pos):
                     self.camera_dragging = True
                     self.camera_drag_position = event.pos
                 elif event.button == 1 and self.pause_button.collidepoint(event.pos):
-                    self.simulation_paused = not self.simulation_paused
-                    self.log("Paused." if self.simulation_paused else "Playing.")
-                elif event.button == 1 and any(
-                    rect.collidepoint(event.pos) for rect, _ in self.time_speed_buttons
+                    self.toggle_simulation_pause()
+                elif event.button == 1 and self.speed_down_button.collidepoint(event.pos):
+                    self.adjust_time_speed(-1)
+                elif event.button == 1 and self.speed_up_button.collidepoint(event.pos):
+                    self.adjust_time_speed(1)
+                elif event.button == 1 and self.step_button.collidepoint(event.pos):
+                    self.start_single_command_step()
+                elif event.button == 1 and self.equipment_toggle_button.collidepoint(
+                    event.pos
                 ):
-                    self.time_speed = next(
-                        speed for rect, speed in self.time_speed_buttons if rect.collidepoint(event.pos)
+                    self.toggle_equipment_panel()
+                elif event.button == 1 and any(
+                    rect.collidepoint(event.pos)
+                    for rect, _page in self.player_info_tab_buttons
+                ):
+                    self.inventory_page = next(
+                        page
+                        for rect, page in self.player_info_tab_buttons
+                        if rect.collidepoint(event.pos)
                     )
-                    label = next(label for label, speed in TIME_SPEED_OPTIONS if speed == self.time_speed)
-                    self.log(f"Time speed: {label}.")
+                elif event.button == 1 and any(
+                    rect.collidepoint(event.pos) for rect, _action in self.macro_buttons
+                ):
+                    action = next(
+                        action
+                        for rect, action in self.macro_buttons
+                        if rect.collidepoint(event.pos)
+                    )
+                    if action == "Start":
+                        self.start_macro_recording()
+                    elif action == "Stop":
+                        self.stop_macro_recording()
+                    else:
+                        if self.macro_recording:
+                            self.stop_macro_recording()
+                        self.open_memory_editor()
+                elif event.button == 1 and any(
+                    rect.collidepoint(event.pos)
+                    for rect, _action in self.macro_command_buttons
+                ):
+                    action = next(
+                        action
+                        for rect, action in self.macro_command_buttons
+                        if rect.collidepoint(event.pos)
+                    )
+                    if action == "Start":
+                        self.start_macro_recording()
+                    elif action == "Stop":
+                        self.stop_macro_recording()
+                    else:
+                        self.open_memory_editor()
                 elif event.button == 1 and self.context_menu_options:
                     option_index = next(
                         (index for index, (rect, _) in enumerate(self.context_menu) if rect.collidepoint(event.pos)),
@@ -686,6 +990,7 @@ class Game:
                         self.context_menu_options = []
                         self.context_menu_pos = None
                         self.context_ground_target = None
+                        self.context_inventory_item_id = None
                 elif event.button == 1 and RELOAD_BUTTON.collidepoint(event.pos):
                     self.reload_map()
                 elif self.day.mode is Mode.MORNING:
@@ -754,8 +1059,8 @@ class Game:
                                 self.active_command = command
                                 self.pending_target_areas.clear()
                                 suffix = (
-                                    " Or click the character to gather the nearest amount."
-                                    if command in AREA_COMMAND_TYPES
+                                    " Or click the character to choose the nearest amount."
+                                    if command in NEAREST_AREA_COMMANDS
                                     else ""
                                 )
                                 self.log(f"{command}: drag a rectangle on the map.{suffix}")
@@ -811,50 +1116,132 @@ class Game:
         self.pending_failed_memory_thought = "Why did I come here?"
         self.thought_bubble_text = None
         self.thought_bubble_timer = 0.0
+        self.thought_bubble_source = None
+        self.condition_thought_cooldown = 2.0
         self.command_drag_start = None
         self.command_drag_current = None
         self.log(f"Reloaded map: {self.map.name}")
 
     def reload_sprites(self) -> None:
         self.object_sprites.reload()
+        self.tile_sprites.reload()
+        self.boundary_sprites.reload()
         self.log("Sprites reloaded.")
 
     def handle_morning_key(self, key: int) -> None:
-        options = self.morning_options()
-        number_index = {
-            pygame.K_1: 0,
-            pygame.K_2: 1,
-            pygame.K_3: 2,
-            pygame.K_4: 3,
-            pygame.K_5: 4,
-            pygame.K_6: 5,
-            pygame.K_KP1: 0,
-            pygame.K_KP2: 1,
-            pygame.K_KP3: 2,
-            pygame.K_KP4: 3,
-            pygame.K_KP5: 4,
-            pygame.K_KP6: 5,
-        }.get(key)
-        if number_index is not None and number_index < len(options):
-            self.menu_index = number_index
-            self.choose_morning_option(options[number_index])
-        elif key in (pygame.K_UP, pygame.K_w):
-            self.menu_index = (self.menu_index - 1) % len(options)
-        elif key in (pygame.K_DOWN, pygame.K_s):
-            self.menu_index = (self.menu_index + 1) % len(options)
-        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
-            self.choose_morning_option(options[self.menu_index])
-        elif key == pygame.K_d:
-            self.choose_morning_option("Direct Control")
-        elif key == pygame.K_r and self.day.remembered_routine:
-            self.choose_morning_option("Replay Remembered Routine")
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            self.start_planned_day()
+        elif key == pygame.K_e:
+            self.open_memory_editor()
 
     def handle_morning_click(self, pos: tuple[int, int]) -> None:
-        for index, (rect, label) in enumerate(self.morning_button_rects()):
+        for rect, action, index in self.day_plan_buttons:
             if rect.collidepoint(pos):
-                self.menu_index = index
-                self.choose_morning_option(label)
+                if action == "start":
+                    self.start_planned_day()
+                elif action == "editor":
+                    self.open_memory_editor()
+                elif action == "add_macro" and index is not None:
+                    routines = sorted(self.available_command_sets(), key=lambda item: item[0].lower())
+                    self.add_macro_to_day_plan(routines[index][0])
+                elif action == "add_conditional":
+                    insertion = next((i for i, item in enumerate(self.day_plan) if item.kind == "sleep"), len(self.day_plan))
+                    self.day_plan.insert(insertion, DayPlanActivity("conditional", "If time ≥ 12:00 PM"))
+                    self.selected_conditional_index = insertion
+                elif action.startswith("add_activity:"):
+                    kind = action.split(":", 1)[1]
+                    labels = {
+                        "explore": "Explore",
+                        "sleep": "Sleep",
+                        "power_nap": "Power Nap",
+                        "break": "Break",
+                    }
+                    scheduled = 23 * 60 if kind == "sleep" else None
+                    self.day_plan.append(DayPlanActivity(kind, labels[kind], scheduled_minutes=scheduled))
+                elif action == "select_conditional" and index is not None:
+                    self.selected_conditional_index = index
+                elif action == "add_slot" and index is not None:
+                    self.day_plan[index].children.append(DayPlanActivity("slot", "Choose routine…"))
+                    self.selected_conditional_index = index
+                elif action.startswith("remove_slot:") and index is not None:
+                    child_index = int(action.split(":", 1)[1])
+                    if child_index < len(self.day_plan[index].children):
+                        self.day_plan[index].children.pop(child_index)
+                elif action == "up" and index is not None and index > 0:
+                    self.day_plan[index - 1], self.day_plan[index] = (
+                        self.day_plan[index], self.day_plan[index - 1]
+                    )
+                elif action == "down" and index is not None and index + 1 < len(self.day_plan):
+                    self.day_plan[index + 1], self.day_plan[index] = (
+                        self.day_plan[index], self.day_plan[index + 1]
+                    )
+                elif action == "delete" and index is not None:
+                    self.day_plan.pop(index)
                 return
+
+    def add_macro_to_day_plan(self, name: str) -> None:
+        if (
+            self.selected_conditional_index is not None
+            and self.selected_conditional_index < len(self.day_plan)
+            and self.day_plan[self.selected_conditional_index].kind == "conditional"
+        ):
+            conditional = self.day_plan[self.selected_conditional_index]
+            replacement = DayPlanActivity("macro", f"Routine: {name}", macro_name=name)
+            empty = next((i for i, child in enumerate(conditional.children) if child.kind == "slot"), None)
+            if empty is None:
+                conditional.children.append(replacement)
+            else:
+                conditional.children[empty] = replacement
+            return
+        insertion = next(
+            (i for i, item in enumerate(self.day_plan) if item.kind == "sleep"),
+            len(self.day_plan),
+        )
+        self.day_plan.insert(
+            insertion, DayPlanActivity("macro", f"Routine: {name}", macro_name=name)
+        )
+
+    def start_planned_day(self) -> None:
+        planned_routine: list[RoutineStep] = []
+        unavailable: list[str] = []
+
+        def append_activity(activity: DayPlanActivity) -> None:
+            if activity.kind == "macro" and activity.macro_name:
+                try:
+                    planned_routine.extend(
+                        load_memory_file(
+                            activity.macro_name,
+                            tile_size=self.map.tile_map.tile_size,
+                            directory=self.memory_directory,
+                        )
+                    )
+                except MapLoadError:
+                    unavailable.append(activity.macro_name)
+            elif activity.kind == "conditional":
+                for child in activity.children:
+                    append_activity(child)
+
+        for activity in self.day_plan:
+            append_activity(activity)
+
+        if planned_routine:
+            self.day.remembered_routine = planned_routine
+            self.day.mode = Mode.REPLAY
+            self.day.replay_index = 0
+            self.day.today_routine.clear()
+            self.replay_outcome = "planned_day"
+            self.record_routine_commands = False
+            self.simulation_step_accumulator = 0.0
+            self.simulation_paused = False
+            self.log(f"Playing {len(planned_routine)} planned commands.")
+        else:
+            self.choose_morning_option("Direct Control")
+        for name in unavailable:
+            self.log(f"Skipped unavailable routine: {name}.")
+        self.log(f"Day started with {len(self.day_plan)} planned activities.")
+        if self.day_transition_phase == "planner":
+            self.day_transition_phase = "fade_in"
+            self.day_transition_progress = 0.0
 
     def morning_options(self) -> list[str]:
         options = ["Direct Control"]
@@ -900,7 +1287,9 @@ class Game:
     def start_auto_cheat_memory(self) -> None:
         try:
             loaded = load_memory_file(
-                "homestead", tile_size=self.map.tile_map.tile_size
+                "homestead",
+                tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
             )
         except MapLoadError as exc:
             self.log(f"Could not load homestead.memory: {exc}")
@@ -933,6 +1322,7 @@ class Game:
         self.context_menu_pos = None
         self.memory_edit_field = None
         self.memory_edit_buffer = ""
+        self.memory_browser_open = False
         if (
             self.day.mode is Mode.REPLAY
             and self.day.replay_index < len(self.day.remembered_routine)
@@ -954,6 +1344,10 @@ class Game:
     def handle_memory_editor_key(
         self, key: int, modifiers: int, text_input: str = ""
     ) -> None:
+        if self.memory_browser_open:
+            if key == pygame.K_ESCAPE:
+                self.memory_browser_open = False
+            return
         routine = self.day.remembered_routine
         if self.memory_edit_field is not None:
             if key == pygame.K_ESCAPE:
@@ -993,6 +1387,17 @@ class Game:
             self.replace_memory_step()
 
     def handle_memory_editor_click(self, pos: tuple[int, int]) -> None:
+        if self.memory_browser_open:
+            for rect, name in self.memory_favorite_buttons:
+                if rect.collidepoint(pos):
+                    self.toggle_memory_favorite(name)
+                    return
+            for rect, name in self.memory_browser_rows:
+                if rect.collidepoint(pos):
+                    self.load_named_memory(name)
+                    self.memory_browser_open = False
+                    return
+            return
         if self.memory_file_name_rect.collidepoint(pos):
             self.memory_edit_field = "__memory_file_name__"
             self.memory_edit_buffer = self.memory_file_name
@@ -1018,6 +1423,13 @@ class Game:
         for rect, action in self.memory_editor_buttons:
             if not rect.collidepoint(pos):
                 continue
+            if (
+                action in {"Save", "Run Now", "Record Macro"}
+                and self.memory_edit_field == "__memory_file_name__"
+            ):
+                self.commit_memory_field()
+                if self.memory_edit_field == "__memory_file_name__":
+                    return
             if action == "Done":
                 self.close_memory_editor()
             elif action == "Move Up":
@@ -1030,14 +1442,90 @@ class Game:
                 self.duplicate_memory_step()
             elif action == "New":
                 self.add_memory_step()
+            elif action == "New Set":
+                self.new_command_set()
             elif action == "Save":
                 self.save_named_memory(self.memory_file_name)
             elif action == "Load":
-                self.load_named_memory(self.memory_file_name)
-            elif action == "Save Homestead":
-                self.memory_file_name = "homestead"
-                self.save_named_memory("homestead")
+                self.memory_browser_open = True
+            elif action == "Run Now":
+                self.run_command_set(self.memory_file_name)
+            elif action == "Record Macro":
+                self.start_macro_recording()
             return
+
+    def new_command_set(self) -> None:
+        """Start a blank command set and focus its name for immediate editing."""
+        self.day.remembered_routine.clear()
+        self.day.replay_index = 0
+        self.memory_edit_index = 0
+        self.memory_file_name = ""
+        self.memory_edit_field = "__memory_file_name__"
+        self.memory_edit_buffer = ""
+
+    @property
+    def memory_favorites_path(self) -> Path:
+        return self.memory_directory / ".favorites.json"
+
+    def load_memory_favorites(self) -> set[str]:
+        try:
+            payload = json.loads(self.memory_favorites_path.read_text(encoding="utf-8"))
+            return {str(name) for name in payload if isinstance(name, str)}
+        except (OSError, json.JSONDecodeError, TypeError):
+            return set()
+
+    def save_memory_favorites(self) -> None:
+        self.memory_directory.mkdir(parents=True, exist_ok=True)
+        self.memory_favorites_path.write_text(
+            json.dumps(sorted(self.memory_favorites), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def toggle_memory_favorite(self, name: str) -> None:
+        if name in self.memory_favorites:
+            self.memory_favorites.remove(name)
+        else:
+            self.memory_favorites.add(name)
+        self.save_memory_favorites()
+
+    def available_command_sets(self) -> list[tuple[str, float]]:
+        if not self.memory_directory.is_dir():
+            return []
+        return [
+            (path.stem, path.stat().st_mtime)
+            for path in self.memory_directory.glob("*.jsonc")
+            if path.is_file()
+        ]
+
+    def start_macro_recording(self) -> bool:
+        """Record subsequent direct-play commands into the working command set."""
+        if self.macro_recording:
+            return True
+        if self.day.mode is not Mode.DIRECT:
+            self.log("Macros can only be recorded during Direct Control.")
+            return False
+        self.macro_previous_today_routine = self.day.today_routine
+        self.day.today_routine = self.day.remembered_routine
+        self.macro_record_start_index = len(self.day.remembered_routine)
+        self.macro_recording = True
+        self.record_routine_commands = True
+        if self.adjusting_memory:
+            self.close_memory_editor()
+        self.log(f"Recording macro for command set {self.memory_file_name or '(unnamed)'!r}.")
+        return True
+
+    def stop_macro_recording(self) -> bool:
+        if not self.macro_recording:
+            return False
+        recorded = self.day.remembered_routine[self.macro_record_start_index :]
+        previous = self.macro_previous_today_routine
+        if previous is not None:
+            previous.extend(recorded)
+            self.day.today_routine = previous
+        self.macro_previous_today_routine = None
+        self.macro_recording = False
+        self.log(f"Stopped macro recording; added {len(recorded)} command(s).")
+        return True
 
     def remove_memory_step(self) -> None:
         routine = self.day.remembered_routine
@@ -1066,13 +1554,18 @@ class Game:
 
     def commit_memory_field(self) -> None:
         if self.memory_edit_field == "__memory_file_name__":
+            if not self.memory_edit_buffer.strip():
+                self.log("Enter a command set name before saving.")
+                return
             try:
                 # Resolving validates the name without touching the filesystem.
-                memory_file_path(self.memory_edit_buffer)
+                memory_file_path(self.memory_edit_buffer, self.memory_directory)
             except MapLoadError as exc:
                 self.log(str(exc))
                 return
-            self.memory_file_name = self.memory_edit_buffer.removesuffix(".memory")
+            self.memory_file_name = (
+                self.memory_edit_buffer.removesuffix(".jsonc").removesuffix(".memory")
+            )
             self.memory_edit_field = None
             self.memory_edit_buffer = ""
             return
@@ -1121,9 +1614,10 @@ class Game:
                 name,
                 self.day.remembered_routine,
                 tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
             )
         except (OSError, MapLoadError) as exc:
-            self.log(f"Could not save memory: {exc}")
+            self.log(f"Could not save command set: {exc}")
             return
         self.log(
             f"Saved {len(self.day.remembered_routine)} orders to {path.name}."
@@ -1132,19 +1626,46 @@ class Game:
     def load_named_memory(self, name: str) -> None:
         try:
             routine = load_memory_file(
-                name, tile_size=self.map.tile_map.tile_size
+                name,
+                tile_size=self.map.tile_map.tile_size,
+                directory=self.memory_directory,
             )
         except MapLoadError as exc:
-            self.log(f"Could not load memory: {exc}")
+            self.log(f"Could not load command set: {exc}")
             return
         self.day.remembered_routine = list(routine)
+        self.memory_file_name = name.removesuffix(".jsonc").removesuffix(".memory")
         self.day.replay_index = 0
         self.memory_edit_index = 0
         self.memory_edit_field = None
         self.memory_edit_buffer = ""
         self.log(
-            f"Loaded {len(routine)} orders from {memory_file_path(name).name}."
+            f"Loaded {len(routine)} orders from "
+            f"{memory_file_path(name, self.memory_directory).name}."
         )
+
+    def run_command_set(self, name: str) -> bool:
+        if self.day.mode is not Mode.DIRECT:
+            self.log("A command set can only be launched during Direct Control.")
+            return False
+        if self.has_queued_command():
+            self.log("Finish or cancel the current command before launching a command set.")
+            return False
+        if not self.day.remembered_routine:
+            self.log("The command set is empty.")
+            return False
+        self.running_command_set_name = name or "unnamed"
+        self.day.mode = Mode.REPLAY
+        self.day.replay_index = 0
+        self.replay_outcome = "command_set"
+        self.record_routine_commands = False
+        self.close_memory_editor()
+        self.simulation_paused = False
+        self.log(
+            f"Running command set {self.running_command_set_name!r} "
+            f"({len(self.day.remembered_routine)} orders)."
+        )
+        return True
 
     def move_memory_step(self, direction: int) -> None:
         routine = self.day.remembered_routine
@@ -1219,8 +1740,20 @@ class Game:
         self.path_target = None
 
     def handle_context_click(self, pos: tuple[int, int]) -> None:
+        self.context_inventory_item_id = None
+        self.context_boundary_id = None
         world_pos = self.screen_to_world(pos)
         if world_pos is None:
+            return
+        door = self.door_at_world(*world_pos)
+        if door is not None:
+            self.selected_id = None
+            self.selected_tile = None
+            self.context_boundary_id = door.boundary_id
+            self.context_menu_options = ["Open Door" if not door.open else "Close Door"]
+            self.context_menu_pos = pos
+            self.context_ground_target = None
+            self.preview_path = []
             return
         for obj in reversed(list(self.objects.values())):
             if obj.contains(world_pos):
@@ -1252,6 +1785,7 @@ class Game:
         self.preview_path = []
 
     def show_context_menu(self, obj: WorldObject, screen_pos: tuple[int, int], world_pos: tuple[int, int]) -> None:
+        self.context_inventory_item_id = None
         options = build_context_menu_options(obj, self.player, world_pos, self.objects)
         if not options:
             self.log("No available action.")
@@ -1271,8 +1805,43 @@ class Game:
             if option == RUINED_BUCKET_REQUIRED:
                 self.log("The ruined bucket cannot hold water.")
             return
+        inventory_item_id = self.context_inventory_item_id
+        boundary_id = self.context_boundary_id
         self.context_menu_options = []
         self.context_menu_pos = None
+        self.context_inventory_item_id = None
+        self.context_boundary_id = None
+        if option in {"Open Door", "Close Door"} and boundary_id is not None:
+            door = next(
+                (item for item in self.map.boundaries if item.boundary_id == boundary_id),
+                None,
+            )
+            if door is None:
+                return
+            if door.locked:
+                self.log("The door is locked.")
+                return
+            if self.distance_to_boundary(door, (self.player.x, self.player.y)) > self.interaction_distance:
+                self.log("Move closer to the door.")
+                return
+            door.open = option == "Open Door"
+            self.log("Opened the door." if door.open else "Closed the door.")
+            return
+        if inventory_item_id is not None and option.startswith("Eat "):
+            food = self.objects.get(inventory_item_id)
+            if (
+                food is not None
+                and food.active
+                and food in self.player.carried_objects
+                and "edible" in food.traits
+            ):
+                if self.record_routine_commands:
+                    self.record_rewind_checkpoint(option)
+                    self.day.today_routine.append(
+                        RoutineStep(None, option, food.type_id)
+                    )
+                self.consume_carried_food(food, "from inventory")
+            return
         if option == "Fill Barrel" and self.selected_id is not None:
             self.begin_barrel_source_selection(self.selected_id)
             return
@@ -1302,6 +1871,14 @@ class Game:
                 self.area_job_timer = 0.0
                 self.resume_for_command()
                 self.path_target = target
+            self.context_ground_target = None
+            return
+        if option == "Drink Water" and self.selected_id is None:
+            target = self.context_ground_target
+            if target is not None and self.queue_terrain_drink(target, record=True):
+                self.log("Going to drink water.")
+            else:
+                self.log("That terrain action is unavailable.")
             self.context_ground_target = None
             return
         if option in {"Gather Water", "Water Crop", "Tend Plant"} and self.selected_id is None:
@@ -1346,6 +1923,27 @@ class Game:
         if self.selected_id is None:
             return
         self.queue_job(self.selected_id, option, record=True)
+
+    def queue_terrain_drink(
+        self, target: tuple[float, float], *, record: bool
+    ) -> bool:
+        located = self.map.tile_map.tile_at_world(*target)
+        if (
+            located is None
+            or located[2].kind not in {TileKind.SHALLOW_WATER, TileKind.POND}
+            or not self.plan_path(target)
+        ):
+            return False
+        self.pending_area_target = AreaTarget("Drink Water", target)
+        self.area_job_timer = 0.0
+        self.resume_for_command()
+        self.path_target = target
+        if record and self.record_routine_commands:
+            self.record_rewind_checkpoint("Drink Water")
+            self.day.today_routine.append(
+                RoutineStep(None, "Drink Water", target_point=target)
+            )
+        return True
 
     def activate_sidebar_action(self, index: int) -> None:
         if self.selected_id is None:
@@ -1392,8 +1990,8 @@ class Game:
             return
         self.active_command = selected
         suffix = (
-            " Or click the character to gather the nearest amount."
-            if selected in AREA_COMMAND_TYPES
+            " Or click the character to choose the nearest amount."
+            if selected in NEAREST_AREA_COMMANDS
             else ""
         )
         self.log(f"{selected}: drag a rectangle on the map.{suffix}")
@@ -1409,15 +2007,27 @@ class Game:
         if start is None or end is None or self.active_command is None:
             return
         if (
-            self.active_command in AREA_COMMAND_TYPES
+            self.active_command in NEAREST_AREA_COMMANDS
             and math.dist(end, (self.player.x, self.player.y)) <= self.player_radius
             and math.dist(start, end) <= self.player_radius
         ):
             command = self.active_command
             self.active_command = None
             self.pending_target_areas.clear()
-            self.queue_nearest_gather_command(
-                command, self.area_command_quantity, record=True
+            self.queue_nearest_area_command(
+                command,
+                self.area_command_quantity,
+                record=True,
+                max_game_minutes=(
+                    None
+                    if command == "Till Grassland" and self.till_until_done
+                    else self.till_max_game_minutes
+                    if command == "Till Grassland"
+                    else None
+                ),
+                till_until_done=(
+                    self.till_until_done if command == "Till Grassland" else False
+                ),
             )
             return
         left, top, right, bottom = tile_aligned_area_bounds(
@@ -1572,6 +2182,7 @@ class Game:
             return
         self.barrel_fill_job = BarrelFillJob(barrel_id, source_areas)
         if record and self.record_routine_commands:
+            self.record_rewind_checkpoint("Fill Barrel")
             self.day.today_routine.append(
                 RoutineStep(
                     barrel_id,
@@ -1608,6 +2219,7 @@ class Game:
         )
         crop_points = crop_points[:quantity]
         if record and self.record_routine_commands:
+            self.record_rewind_checkpoint("Water Crops")
             self.day.today_routine.append(
                 RoutineStep(
                     None,
@@ -1731,8 +2343,10 @@ class Game:
                     targets.append(partial)
         elif command == "Plant Wheat":
             targets = targets[: self.player.inventory["seed"]]
-        elif command in {"Gather Water", "Water Crops"}:
+        elif command == "Gather Water":
             targets = targets[:1]
+        elif command == "Water Crops":
+            targets = targets[: min(quantity, self.player.bucket_water_uses)]
         elif build_type is not None:
             cost = self.build_cost(build_type)
             affordable = min(
@@ -1746,6 +2360,7 @@ class Game:
         self.pending_area_target = None
         self.area_job_timer = 0.0
         if record and self.record_routine_commands:
+            self.record_rewind_checkpoint(command)
             self.day.today_routine.append(
                 RoutineStep(
                     None,
@@ -1799,35 +2414,41 @@ class Game:
     def queue_nearest_gather_command(
         self, command: str, quantity: int, *, record: bool
     ) -> None:
-        if command not in AREA_COMMAND_TYPES:
+        self.queue_nearest_area_command(command, quantity, record=record)
+
+    def queue_nearest_area_command(
+        self,
+        command: str,
+        quantity: int,
+        *,
+        record: bool,
+        max_game_minutes: int | None = None,
+        till_until_done: bool = False,
+    ) -> None:
+        if command not in NEAREST_AREA_COMMANDS:
             return
-        targets = self.build_area_targets(
-            command, (0, 0, self.map.width, self.map.height)
+        routine_count = len(self.day.today_routine)
+        self.queue_area_command(
+            command,
+            (0, 0, self.map.width, self.map.height),
+            quantity,
+            record=record,
+            max_game_minutes=max_game_minutes,
+            till_until_done=till_until_done,
         )
-        targets.sort(
-            key=lambda target: math.dist(
-                (self.player.x, self.player.y), target.point
+        if (
+            record
+            and self.record_routine_commands
+            and len(self.day.today_routine) > routine_count
+        ):
+            self.day.today_routine[-1] = replace(
+                self.day.today_routine[-1],
+                area_bounds=None,
+                target_areas=None,
+                nearest_to_player=True,
             )
-        )
-        self.area_targets = targets[:quantity]
-        self.pending_area_target = None
-        self.area_job_timer = 0.0
-        if record and self.record_routine_commands:
-            self.day.today_routine.append(
-                RoutineStep(
-                    None,
-                    command,
-                    quantity=quantity,
-                    nearest_to_player=True,
-                )
-            )
-        if self.area_targets:
-            self.resume_for_command()
-        elif self.day.mode is Mode.REPLAY:
-            self.show_failed_nearest_gather(command)
-            self.resume_for_command()
         self.log(
-            f"Nearest gather queued {len(self.area_targets)} "
+            f"Nearest area command chose {len(self.area_targets)} "
             f"target{'s' if len(self.area_targets) != 1 else ''}."
         )
 
@@ -1840,6 +2461,7 @@ class Game:
         self.thought_bubble_text = self.pending_failed_memory_thought
         self.pending_failed_memory_thought = "Why did I come here?"
         self.thought_bubble_timer = 2.5
+        self.thought_bubble_source = "memory"
         self.log(self.thought_bubble_text)
 
     @staticmethod
@@ -1851,6 +2473,7 @@ class Game:
             "Gather Branches": "there are no branches here",
             "Gather Seeds": "there are no seeds here",
             "Gather Tall Grass": "there is no tall grass here",
+            "Harvest Berries": "there are no ripe berries here",
             "Chop Trees": "there are no trees here to chop",
             "Till Grassland": "there is no grassland here to till",
             "Plant Wheat": "there is no open soil here to plant",
@@ -1886,8 +2509,19 @@ class Game:
         if type_ids is not None:
             for obj in self.objects.values():
                 center_x, center_y = obj.center
-                if obj.active and obj.type_id in type_ids and left <= center_x <= right and top <= center_y <= bottom:
-                    targets.append(AreaTarget("Gather", obj.center, obj.object_id))
+                action = (
+                    "Harvest Berries"
+                    if command == "Harvest Berries"
+                    else "Gather"
+                )
+                if (
+                    obj.active
+                    and obj.type_id in type_ids
+                    and action in available_actions(obj, self.player)
+                    and left <= center_x <= right
+                    and top <= center_y <= bottom
+                ):
+                    targets.append(AreaTarget(action, obj.center, obj.object_id))
         elif command == "Chop Trees":
             if not self.player.carrying_axe:
                 return []
@@ -2037,6 +2671,16 @@ class Game:
         if self.pending_job is not None:
             return False
         obj = self.objects.get(target_id)
+        nap_window: str | None = None
+        if action == "Power Nap":
+            nap_window = self.power_nap_window()
+            if (
+                nap_window is None
+                or nap_window in self.player.used_nap_windows
+                or self.player.conditions["fatigue"] <= 0
+            ):
+                self.log("A power nap is not available now.")
+                return False
         if obj is None or action not in available_actions(obj, self.player):
             self.log(f"Skipped unavailable job: {action}.")
             if self.day.mode is Mode.REPLAY and advances_replay:
@@ -2056,11 +2700,14 @@ class Game:
                 )
             return False
         self.pending_job = PendingJob(target_id, action, self.walk_target, advances_replay)
+        if nap_window is not None:
+            self.player.used_nap_windows.add(nap_window)
         self.resume_for_command()
         self.selected_id = None
         self.preview_path = []
         self.job_timer = 0.0
         if record and self.record_routine_commands and action != "Sleep":
+            self.record_rewind_checkpoint(action)
             self.day.today_routine.append(
                 RoutineStep(
                     target_id,
@@ -2073,6 +2720,14 @@ class Game:
                 )
             )
         return True
+
+    def power_nap_window(self) -> str | None:
+        minutes = self.day.current_time_minutes
+        if 13 * 60 <= minutes < 17 * 60:
+            return "early"
+        if 17 * 60 <= minutes < 21 * 60:
+            return "late"
+        return None
 
     def resolve_routine_target(self, step: RoutineStep) -> int | None:
         """Resolve an object-specific order without changing what it referred to."""
@@ -2193,9 +2848,22 @@ class Game:
         return candidate.passable[candidate_edge] and object_tile.passable[object_edge]
 
     def move_along_path(self, dt: float) -> bool:
-        remaining_distance = max(0.0, self.player.speed * dt)
+        remaining_distance = max(
+            0.0, self.player.speed * movement_speed_multiplier(self.player) * dt
+        )
         while self.navigation_path and remaining_distance > 0.0:
             target_x, target_y = self.navigation_path[0]
+            door = self.door_crossed_by_step(
+                (self.player.x, self.player.y), (target_x, target_y)
+            )
+            if door is not None and not door.open:
+                if door.locked:
+                    self.navigation_path = []
+                    self.walk_target = None
+                    return False
+                door.open = True
+                self.log("Stopped to open the door.")
+                return True
             dx = target_x - self.player.x
             dy = target_y - self.player.y
             distance = math.hypot(dx, dy)
@@ -2221,6 +2889,61 @@ class Game:
             self.walk_target = self.navigation_path[-1]
         return True
 
+    def door_at_world(self, x: float, y: float) -> BoundaryObject | None:
+        """Return a door whose closed doorway edge is near a world position."""
+        tolerance = max(8.0, 10.0 / self.camera.effective_zoom)
+        return next(
+            (
+                boundary
+                for boundary in reversed(self.map.boundaries)
+                if boundary.kind == "door"
+                and self.distance_to_boundary(boundary, (x, y)) <= tolerance
+            ),
+            None,
+        )
+
+    def distance_to_boundary(
+        self, boundary: BoundaryObject, point: tuple[float, float]
+    ) -> float:
+        size = self.map.tile_map.tile_size
+        x, y = point
+        line_x = boundary.column * size
+        line_y = boundary.row * size
+        if boundary.edge == "west":
+            nearest_y = max(line_y, min(line_y + size, y))
+            return math.dist((x, y), (line_x, nearest_y))
+        nearest_x = max(line_x, min(line_x + size, x))
+        return math.dist((x, y), (nearest_x, line_y))
+
+    def door_crossed_by_step(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> BoundaryObject | None:
+        """Find the canonical boundary crossed by a cardinal tile-center step."""
+        size = self.map.tile_map.tile_size
+        start_column, start_row = int(start[0] // size), int(start[1] // size)
+        end_column, end_row = int(end[0] // size), int(end[1] // size)
+        if (start_column, start_row) == (end_column, end_row):
+            return None
+        if end_column > start_column:
+            address = (end_column, start_row, "west")
+        elif end_column < start_column:
+            address = (start_column, start_row, "west")
+        elif end_row > start_row:
+            address = (start_column, end_row, "north")
+        else:
+            address = (start_column, start_row, "north")
+        return next(
+            (
+                boundary
+                for boundary in self.map.boundaries
+                if boundary.kind == "door"
+                and (boundary.column, boundary.row, boundary.edge) == address
+            ),
+            None,
+        )
+
     def can_stand_at(self, x: float, y: float) -> bool:
         if (
             x < self.player_radius
@@ -2235,7 +2958,12 @@ class Game:
         return True
 
     def player_spawn(self) -> tuple[float, float]:
-        bed = self.object_of_type("bed")
+        character = self.map.characters.get(self.map.controlled_character_id or -1)
+        bed = (
+            self.objects[character.last_sleep_id]
+            if character is not None
+            else self.object_of_type("bed")
+        )
         tile_map = self.map.tile_map
         first_column = bed.x // tile_map.tile_size
         last_column = (bed.x + bed.width - 1) // tile_map.tile_size
@@ -2253,7 +2981,7 @@ class Game:
             if tile_map.can_stand_at(*point, self.player_radius)
         ]
         if not standable:
-            raise MapLoadError("The bed has no valid adjacent player spawn tile")
+            raise MapLoadError("The sleep object has no valid adjacent player spawn tile")
         north_of_bed = [point for point in standable if point[1] < bed.y]
         if north_of_bed:
             return min(north_of_bed, key=lambda point: (math.dist(point, bed.center), abs(point[0] - bed.center[0])))
@@ -2274,8 +3002,46 @@ class Game:
 
     def resume_for_command(self) -> None:
         self.simulation_paused = False
+        if self.single_step_active:
+            self.single_step_command_started = True
+
+    def toggle_simulation_pause(self) -> None:
+        self.simulation_paused = not self.simulation_paused
+        if not self.simulation_paused:
+            self.single_step_active = False
+            self.single_step_command_started = False
+        self.log("Paused." if self.simulation_paused else "Playing.")
+
+    def toggle_equipment_panel(self) -> None:
+        self.equipment_collapsed = not self.equipment_collapsed
+
+    def adjust_time_speed(self, direction: int) -> None:
+        speeds = [speed for _label, speed in TIME_SPEED_OPTIONS]
+        try:
+            index = speeds.index(self.time_speed)
+        except ValueError:
+            index = min(
+                range(len(speeds)),
+                key=lambda candidate: abs(speeds[candidate] - self.time_speed),
+            )
+        index = max(0, min(len(speeds) - 1, index + direction))
+        self.time_speed = speeds[index]
+        label = TIME_SPEED_OPTIONS[index][0]
+        self.log(f"Time speed: {label}.")
+
+    def start_single_command_step(self) -> None:
+        if self.day.mode is Mode.MORNING:
+            return
+        self.single_step_active = True
+        self.single_step_command_started = self.has_queued_command()
+        self.simulation_paused = False
+        self.log("Single-command step started.")
 
     def cancel_current_command(self) -> None:
+        cancelled_command_set = (
+            self.day.mode is Mode.REPLAY
+            and self.replay_outcome == "command_set"
+        )
         recorded_action: str | None = None
         if self.field_water_job is not None:
             recorded_action = "Water Crops"
@@ -2322,6 +3088,12 @@ class Game:
         self.selected_tile = None
         if self.day.mode is Mode.REPLAY:
             self.day.mode = Mode.DIRECT
+        if cancelled_command_set:
+            cancelled_name = self.running_command_set_name or "unnamed"
+            self.running_command_set_name = None
+            self.replay_outcome = "expand"
+            self.record_routine_commands = True
+            self.log(f"Command set {cancelled_name!r} stopped.")
         if had_command:
             self.log("Command cancelled.")
 
@@ -2451,6 +3223,7 @@ class Game:
             },
             capacity=form.capacity_for(100),
             nutrition=form.nutrition,
+            condition_recovery=dict(form.condition_recovery),
             type_id="crop",
             quality=100,
             persistent=False,
@@ -2658,6 +3431,8 @@ class Game:
         return True
 
     def update(self, dt: float) -> None:
+        for message in self.quests.update(self.player, self.day):
+            self.log(message)
         if self.adjusting_memory:
             return
         if self.day_transition_phase is not None:
@@ -2667,13 +3442,13 @@ class Game:
             self.choose_morning_option("Replay Memory and Sleep")
         if self.day.mode is Mode.DIRECT and not self.has_queued_command():
             self.simulation_paused = True
-        if self.thought_bubble_timer > 0.0:
-            self.thought_bubble_timer = max(0.0, self.thought_bubble_timer - dt)
-            if self.thought_bubble_timer == 0.0:
-                self.thought_bubble_text = None
-        if self.day.mode is Mode.MORNING or self.simulation_paused:
+        self.update_condition_thoughts(dt)
+        if self.day.mode is Mode.MORNING:
             self.simulation_step_accumulator = 0.0
             self._update_simulation_tick(0.0)
+            return
+        if self.simulation_paused:
+            self.simulation_step_accumulator = 0.0
             return
         self.simulation_step_accumulator += dt * self.time_speed
         processed_tick = False
@@ -2683,6 +3458,7 @@ class Game:
         ):
             self.simulation_step_accumulator -= FIXED_SIMULATION_TICK_SECONDS
             self._update_simulation_tick(FIXED_SIMULATION_TICK_SECONDS)
+            self.record_day_position()
             processed_tick = True
             if self.day.mode is Mode.DIRECT and not self.has_queued_command():
                 self.simulation_paused = True
@@ -2696,6 +3472,263 @@ class Game:
         if not processed_tick:
             self._update_simulation_tick(0.0)
 
+    def record_day_position(self) -> None:
+        """Keep the visible route through the day for the nightly rewind."""
+        position = (self.player.x, self.player.y)
+        if position != self.day_position_history[-1]:
+            self.day_position_history.append(position)
+
+    def record_rewind_checkpoint(self, action: str) -> None:
+        """Capture the world immediately before a recorded command begins."""
+        tile_visuals = {
+            (column, row): (tile.kind, tuple(tile.properties))
+            for row in range(self.map.tile_map.rows)
+            for column in range(self.map.tile_map.columns)
+            if (tile := self.map.tile_map.tile_at(column, row)) is not None
+        }
+        snapshot: dict[str, object] = {
+            "objects": copy.deepcopy(self.objects),
+            "tile_states": copy.deepcopy(self.map.tile_states),
+            "tile_visuals": tile_visuals,
+            "inventory": copy.deepcopy(self.player.inventory),
+            "player_equipment": (
+                self.player.has_hoe,
+                self.player.carrying_hoe,
+                self.player.hoe_quality,
+                self.player.has_axe,
+                self.player.carrying_axe,
+            ),
+        }
+        self.rewind_checkpoints.append(
+            (len(self.day_position_history) - 1, action, snapshot)
+        )
+
+    def restore_rewind_checkpoint(self, snapshot: dict[str, object]) -> None:
+        objects = copy.deepcopy(snapshot["objects"])
+        for object_id, persistent in self.rewind_persistent_objects.items():
+            objects[object_id] = copy.deepcopy(persistent)
+        self.objects = objects
+        self.map.objects = objects
+        self.map.tile_states = copy.deepcopy(snapshot["tile_states"])
+        rebuild_tile_map(self.map)
+        tile_visuals = snapshot["tile_visuals"]
+        for position, (kind, properties) in tile_visuals.items():
+            tile = self.map.tile_map.tile_at(*position)
+            if tile is not None:
+                tile.kind = kind
+                tile.properties = list(properties)
+        for position, (kind, properties, state) in self.rewind_persistent_tiles.items():
+            tile = self.map.tile_map.tile_at(*position)
+            if tile is not None:
+                tile.kind = kind
+                tile.properties = list(properties)
+            if state is None:
+                self.map.tile_states.pop(position, None)
+            else:
+                self.map.tile_states[position] = copy.deepcopy(state)
+        self.player.inventory = copy.deepcopy(snapshot["inventory"])
+        (
+            self.player.has_hoe,
+            self.player.carrying_hoe,
+            self.player.hoe_quality,
+            self.player.has_axe,
+            self.player.carrying_axe,
+        ) = snapshot["player_equipment"]
+        self.player.carried_objects = [
+            obj for obj in objects.values() if obj.container == "player" and obj.active
+        ]
+        self.storage_memories = self.load_storage_memories()
+
+    def capture_transition_state(self) -> tuple[object, ...]:
+        map_state, player_state, day_state, storage_state = copy.deepcopy(
+            (self.map, self.player, self.day, self.storage_memories)
+        )
+        return (
+            map_state,
+            player_state,
+            day_state,
+            storage_state,
+            copy.deepcopy(self.quests.state_data()),
+        )
+
+    def restore_transition_state(self, state: tuple[object, ...]) -> None:
+        (
+            self.map,
+            self.player,
+            self.day,
+            self.storage_memories,
+            quest_state,
+        ) = copy.deepcopy(state)
+        self.objects = self.map.objects
+        self.build_memories = self.map.build_memories
+        self.quests.restore_state(quest_state)
+        self.sync_all_barrel_sprite_states()
+
+    def active_condition_complaints(self) -> list[tuple[str, str]]:
+        complaints: list[tuple[str, str]] = []
+        for condition_id in CONDITION_IDS:
+            value = self.player.conditions.get(condition_id, 0.0)
+            text = next(
+                (
+                    complaint
+                    for threshold, complaint in CONDITION_COMPLAINTS[condition_id]
+                    if value >= threshold
+                ),
+                None,
+            )
+            if text is not None:
+                complaints.append((condition_id, text))
+        return complaints
+
+    def clear_negative_conditions(self) -> None:
+        for condition_id in CONDITION_IDS:
+            self.player.conditions[condition_id] = 0.0
+        self.thought_bubble_text = None
+        self.thought_bubble_timer = 0.0
+        self.thought_bubble_source = None
+        self.condition_thought_cooldown = 2.0
+        self.log("Cheat: all negative conditions removed.")
+
+    def handle_inventory_food_click(self, position: tuple[int, int]) -> bool:
+        if self.inventory_page is not InventoryPage.INVENTORY:
+            return False
+        food = next(
+            (
+                item
+                for rect, item in self.inventory_food_buttons
+                if rect.collidepoint(position)
+            ),
+            None,
+        )
+        if food is None:
+            return False
+        self.context_menu_options = [f"Eat {food.name}"]
+        self.context_menu_pos = position
+        self.context_ground_target = None
+        self.context_inventory_item_id = food.object_id
+        self.selected_id = None
+        return True
+
+    def area_target_duration(self, target: AreaTarget) -> float:
+        if target.action == "Till Grassland":
+            return (
+                tilling_duration_seconds(self.player.hoe_quality)
+                * target.work_fraction
+            )
+        if target.action == "Plant Wheat":
+            return planting_duration_seconds(self.player.has_basket)
+        if target.action == "Harvest Wheat":
+            interaction = self.map.object_types["crop"].form_definition(
+                "mature", "wheat"
+            ).interactions["Harvest Wheat"]
+            duration = interaction["duration_seconds"]
+            duration_key = (
+                "with_basket"
+                if self.player.has_basket and "with_basket" in duration
+                else "base"
+            )
+            return float(duration[duration_key]) / self.skill_speed_multiplier(
+                "harvesting"
+            )
+        if target.action == "Harvest Berries" and target.target_id is not None:
+            bush = self.objects[target.target_id]
+            return object_job_duration_seconds(
+                "Harvest Berries", bush, self.player.has_basket
+            ) / self.skill_speed_multiplier("harvesting")
+        if target.action in BUILD_COMMAND_TYPES:
+            build_type = BUILD_COMMAND_TYPES[target.action]
+            return self.map.object_types[
+                build_type
+            ].form_definition().build_duration_seconds
+        return 0.0
+
+    def active_work_progress(self) -> tuple[str, float] | None:
+        if self.pending_area_target is not None:
+            duration = self.area_target_duration(self.pending_area_target)
+            if duration > 0.0 and math.dist(
+                (self.player.x, self.player.y), self.pending_area_target.point
+            ) <= 4:
+                return (
+                    self.pending_area_target.action,
+                    max(0.0, min(1.0, self.area_job_timer / duration)),
+                )
+        if self.pending_job is not None:
+            point = self.pending_job.interaction_point
+            if point is None or math.dist((self.player.x, self.player.y), point) > 4:
+                return None
+            target = self.objects.get(self.pending_job.target_id)
+            if target is None:
+                return None
+            duration = object_job_duration_seconds(
+                self.pending_job.action, target, self.player.has_basket
+            )
+            if self.pending_job.action in {"Harvest Berries", "Harvest Wheat"}:
+                duration /= self.skill_speed_multiplier("harvesting")
+            if duration > 0.0:
+                return (
+                    self.pending_job.action,
+                    max(0.0, min(1.0, self.job_timer / duration)),
+                )
+        return None
+
+    def work_thought_text(self) -> str | None:
+        status = self.active_work_progress()
+        if status is None:
+            return None
+        action, progress = status
+        if progress >= 0.75:
+            milestone = "almost done"
+        elif progress >= 0.5:
+            milestone = "1/2 done"
+        elif progress >= 0.25:
+            milestone = "1/4 done"
+        else:
+            return action
+        return f"{action} — {milestone}"
+
+    def update_condition_thoughts(self, dt: float) -> None:
+        if (
+            self.thought_bubble_source == "condition"
+            and self.day.mode is not Mode.DIRECT
+        ):
+            self.thought_bubble_text = None
+            self.thought_bubble_timer = 0.0
+            self.thought_bubble_source = None
+        if self.thought_bubble_timer > 0.0:
+            self.thought_bubble_timer = max(0.0, self.thought_bubble_timer - dt)
+            if self.thought_bubble_timer > 0.0:
+                return
+            ended_source = self.thought_bubble_source
+            self.thought_bubble_text = None
+            self.thought_bubble_source = None
+            self.condition_thought_cooldown = (
+                CONDITION_THOUGHT_GAP_SECONDS
+                if ended_source == "condition"
+                else 2.0
+            )
+        if self.thought_bubble_text is not None:
+            return
+        if self.day.mode is not Mode.DIRECT:
+            return
+        self.condition_thought_cooldown = max(
+            0.0, self.condition_thought_cooldown - dt
+        )
+        if self.condition_thought_cooldown > 0.0:
+            return
+        complaints = self.active_condition_complaints()
+        if not complaints:
+            self.condition_thought_index = 0
+            return
+        _condition_id, complaint = complaints[
+            self.condition_thought_index % len(complaints)
+        ]
+        self.condition_thought_index = (
+            self.condition_thought_index + 1
+        ) % len(complaints)
+        self.thought_bubble_text = complaint
+        self.thought_bubble_source = "condition"
+        self.thought_bubble_timer = CONDITION_THOUGHT_DISPLAY_SECONDS
+
     def _update_simulation_tick(self, dt: float) -> None:
         if self.pending_empty_area_memory and not self.navigation_path:
             self.show_empty_area_memory_thought()
@@ -2705,10 +3738,9 @@ class Game:
             elapsed_minutes = int(self.time_accumulator)
             if elapsed_minutes:
                 self.time_accumulator -= elapsed_minutes
-                end_of_day = START_OF_DAY_MINUTES + DAY_LENGTH_MINUTES
-                self.day.current_time_minutes = min(
-                    end_of_day, self.day.current_time_minutes + elapsed_minutes
-                )
+                self.day.current_time_minutes += elapsed_minutes
+                if self.advance_player_conditions(elapsed_minutes):
+                    return
         if self.update_barrel_fill_job(dt):
             return
         if self.update_field_water_job(dt):
@@ -2768,45 +3800,23 @@ class Game:
                     self.pending_area_target = None
                     self.area_job_timer = 0.0
                 return
-            timed_duration = 0.0
-            progress_message = ""
-            if target.action == "Till Grassland":
-                timed_duration = (
-                    tilling_duration_seconds(self.player.hoe_quality)
-                    * target.work_fraction
-                )
-                progress_message = "Tilling the ground..."
-            elif target.action == "Plant Wheat":
-                timed_duration = planting_duration_seconds(self.player.has_basket)
-                progress_message = "Planting wheat..."
-            elif target.action == "Harvest Wheat":
-                interaction = self.map.object_types["crop"].form_definition(
-                    "mature", "wheat"
-                ).interactions["Harvest Wheat"]
-                duration = interaction["duration_seconds"]
-                duration_key = (
-                    "with_basket"
-                    if self.player.has_basket and "with_basket" in duration
-                    else "base"
-                )
-                timed_duration = float(duration[duration_key])
-                progress_message = "Harvesting wheat..."
-            elif target.action in BUILD_COMMAND_TYPES:
-                build_type = BUILD_COMMAND_TYPES[target.action]
-                timed_duration = self.map.object_types[
-                    build_type
-                ].form_definition().build_duration_seconds
-                progress_message = f"Building a {build_type.replace('_', ' ')}..."
+            timed_duration = self.area_target_duration(target)
             if timed_duration:
                 if self.area_job_timer == 0.0:
-                    self.log(progress_message)
-                self.area_job_timer += dt
+                    self.log(f"{target.action} started.")
+                self.area_job_timer += dt * task_speed_multiplier(self.player)
                 if self.area_job_timer < timed_duration:
                     return
             if target.action == "Gather Water":
                 if self.player.has_bucket and not self.player.bucket_filled:
                     self.player.bucket_water_uses = self.bucket_capacity
                     self.log("Filled the wooden bucket with 5 uses of water.")
+            elif target.action == "Drink Water":
+                recovery = 25.0 if self.player.has_bucket else 5.0
+                apply_condition_effects(self.player, {"thirst": recovery})
+                self.log(
+                    f"Drank from the water ({recovery:g} Thirst recovered)."
+                )
             elif target.action == "Till Grassland" and self.player.carrying_hoe:
                 located = self.map.tile_map.tile_at_world(*target.point)
                 if located is not None and located[2].kind is TileKind.GRASSLAND:
@@ -2838,6 +3848,7 @@ class Game:
                             * state.persistence_modifier,
                         )
                         tile.kind = TileKind.SOIL
+                        self.quests.record_event("soil_tiles_tilled")
                         self.log(
                             "The fully tilled grassland became soil "
                             f"({state.soil_persistence_percentage:.1f}% remembered)."
@@ -2853,6 +3864,7 @@ class Game:
                     if self.crop_at_tile(column, row) is None:
                         self.plant_crop(column, row, "wheat")
                         self.player.inventory["seed"] -= 1
+                        self.quests.record_event("wheat_planted")
                         self.log("Planted wheat seed.")
             elif target.action == "Water Crops" and self.player.bucket_filled:
                 located = self.map.tile_map.tile_at_world(*target.point)
@@ -2893,13 +3905,39 @@ class Game:
                     column, row, _tile = located
                     crop = self.crop_at_tile(column, row)
                     if crop is not None and crop.variant == "wheat" and crop.form == "mature":
+                        grains_before = self.player.inventory["grains"]
                         self.grant_interaction_loot(crop, "Harvest Wheat")
                         crop.active = False
-                        self.log("Harvested 3 wheat.")
+                        grains = self.player.inventory["grains"] - grains_before
+                        self.award_skill_experience("harvesting")
+                        self.quests.record_event("wheat_harvested", grains)
+                        self.log(f"Harvested {grains} grains.")
+            elif target.action == "Harvest Berries" and target.target_id is not None:
+                bush = self.objects[target.target_id]
+                if "Harvest Berries" in available_actions(bush, self.player):
+                    self.complete_job(
+                        PendingJob(
+                            bush.object_id,
+                            "Harvest Berries",
+                            advances_replay=False,
+                        )
+                    )
             self.pending_area_target = None
             self.area_job_timer = 0.0
             self.navigation_path = []
             self.walk_target = None
+            return
+
+        if (
+            self.single_step_active
+            and self.single_step_command_started
+            and not self.has_queued_command()
+        ):
+            self.single_step_active = False
+            self.single_step_command_started = False
+            self.simulation_paused = True
+            self.simulation_step_accumulator = 0.0
+            self.log("Command complete. Paused.")
             return
 
         if (
@@ -2926,14 +3964,24 @@ class Game:
                         self.begin_day_transition()
                 else:
                     self.day.mode = Mode.DIRECT
-                    if self.replay_outcome == "explore":
+                    if self.replay_outcome == "command_set":
+                        completed_name = self.running_command_set_name or "unnamed"
+                        self.running_command_set_name = None
+                        self.day.replay_index = 0
+                        self.replay_outcome = "expand"
+                        self.record_routine_commands = True
+                        self.log(f"Command set {completed_name!r} complete.")
+                    elif self.replay_outcome == "explore":
                         self.log("Routine complete. Explore freely; new orders will not be remembered.")
                     elif self.replay_outcome == "legacy":
                         self.log("Routine complete. Returning to Direct Control.")
+                    elif self.replay_outcome == "planned_day":
+                        self.log("Planned routines complete. Returning to Direct Control.")
                     else:
                         self.log("Routine complete. Expand the remembered routine with new orders.")
             else:
                 step = self.day.remembered_routine[self.day.replay_index]
+                self.record_rewind_checkpoint(step.action)
                 if (
                     step.action == "Water Crops"
                     and step.area_bounds is not None
@@ -2971,10 +4019,45 @@ class Game:
                             step.source_areas or (step.area_bounds,),
                             record=False,
                         )
-                elif step.nearest_to_player and step.action in AREA_COMMAND_TYPES:
+                elif (
+                    step.action == "Drink Water"
+                    and step.target_id is None
+                    and step.target_point is not None
+                ):
                     self.day.replay_index += 1
-                    self.queue_nearest_gather_command(
-                        step.action, step.quantity or 1, record=False
+                    if not self.queue_terrain_drink(step.target_point, record=False):
+                        self.visit_failed_memory(
+                            step.target_point,
+                            step.action,
+                            "there is no reachable water at the remembered place",
+                        )
+                elif step.action.startswith("Eat ") and step.target_id is None:
+                    self.day.replay_index += 1
+                    food = next(
+                        (
+                            carried
+                            for carried in self.player.carried_objects
+                            if carried.active
+                            and "edible" in carried.traits
+                            and (
+                                step.target_type is None
+                                or carried.type_id == step.target_type
+                            )
+                        ),
+                        None,
+                    )
+                    if food is None:
+                        self.log(f"Skipped unavailable remembered job: {step.action}.")
+                    else:
+                        self.consume_carried_food(food, "from inventory")
+                elif step.nearest_to_player and step.action in NEAREST_AREA_COMMANDS:
+                    self.day.replay_index += 1
+                    self.queue_nearest_area_command(
+                        step.action,
+                        step.quantity or 1,
+                        record=False,
+                        max_game_minutes=step.max_game_minutes,
+                        till_until_done=step.till_until_done,
                     )
                 elif step.area_bounds is not None:
                     self.day.replay_index += 1
@@ -3023,17 +4106,79 @@ class Game:
                 if self.day.mode is Mode.REPLAY and job.advances_replay:
                     self.day.replay_index += 1
         else:
-            self.job_timer += dt
+            speed = (
+                1.0
+                if self.pending_job.action == "Power Nap"
+                else task_speed_multiplier(self.player)
+            )
+            self.job_timer += dt * speed
             target = self.objects[self.pending_job.target_id]
             required_duration = object_job_duration_seconds(
                 self.pending_job.action, target, self.player.has_basket
             )
+            if self.pending_job.action in {"Harvest Berries", "Harvest Wheat"}:
+                required_duration /= self.skill_speed_multiplier("harvesting")
             if self.job_timer >= required_duration:
                 job = self.pending_job
                 self.pending_job = None
                 self.complete_job(job)
                 if self.day.mode is Mode.REPLAY and job.advances_replay:
                     self.day.replay_index += 1
+
+    def advance_player_conditions(self, elapsed_minutes: int) -> bool:
+        hourly_change = float(elapsed_minutes) / 60.0
+        lethal = apply_condition_effects(
+            self.player,
+            {
+                "hunger": -hourly_change,
+                "thirst": -hourly_change,
+                "fatigue": -hourly_change,
+            },
+        )
+        trauma_recovery = healing_rate(self.player) * hourly_change
+        if trauma_recovery:
+            lethal = (
+                apply_condition_effects(self.player, {"trauma": trauma_recovery})
+                or lethal
+            )
+        if lethal:
+            self.log("The Forgotten succumbed. Night closes in.")
+            self.cancel_current_command()
+            self.begin_day_transition()
+            return True
+        return False
+
+    def skill_config(self, skill_id: str) -> dict[str, object]:
+        character = self.map.characters.get(self.player.character_id)
+        if character is None:
+            return {}
+        definition = self.map.character_types.get(character.type_id)
+        if definition is None:
+            return {}
+        return definition.skills.get(skill_id, {})
+
+    def skill_speed_multiplier(self, skill_id: str) -> float:
+        config = self.skill_config(skill_id)
+        if skill_id == "harvesting":
+            return harvesting_speed_multiplier(
+                self.player,
+                speed_per_level=float(config.get("speed_per_level", 0.05)),
+            )
+        return 1.0
+
+    def award_skill_experience(self, skill_id: str) -> None:
+        config = self.skill_config(skill_id)
+        leveled = gain_skill_experience(
+            self.player,
+            skill_id,
+            float(config.get("experience_per_action", 1.0)),
+            experience_per_level=float(config.get("experience_per_level", 10.0)),
+        )
+        if leveled:
+            self.log(
+                f"{skill_id.title()} reached level "
+                f"{self.player.skills[skill_id].level}."
+            )
 
     def complete_job(self, job: PendingJob) -> None:
         obj = self.objects[job.target_id]
@@ -3043,16 +4188,24 @@ class Game:
             obj.active = False
             self.log(f"Gathered {', '.join(loot)}.")
         elif action == "Harvest Berries":
+            if not bool(obj.state.get("has_berries", True)):
+                return
             self.grant_interaction_loot(obj, action)
             self.create_interaction_objects(obj, action)
-            obj.active = False
+            obj.state["has_berries"] = False
+            self.award_skill_experience("harvesting")
             self.log("Harvested berries.")
         elif action == "Pull Berry Bush":
+            had_berries = bool(obj.state.get("has_berries", True))
             self.grant_interaction_loot(obj, action)
-            self.create_interaction_objects(obj, action)
+            if had_berries:
+                self.create_interaction_objects(obj, action)
             obj.active = False
             rebuild_tile_map(self.map)
-            self.log("Pulled the berry bush and gathered berries, fiber, and a branch.")
+            self.log(
+                "Pulled the berry bush and gathered "
+                + ("berries, fiber, and a branch." if had_berries else "fiber and a branch.")
+            )
         elif action == "Break Off Branch":
             state = tree_state_data(obj.state)
             if obj.form == "stump" or state["branch_taken"]:
@@ -3114,6 +4267,15 @@ class Game:
                 self.log(f"Took {moved} use{'s' if moved != 1 else ''} from the barrel.")
             self.sync_barrel_sprite_state(data)
             obj.state = data
+        elif action == "Drink from Barrel":
+            data = self.barrel_state(obj)
+            if int(data["water_uses"]) <= 0:
+                return
+            data["water_uses"] = int(data["water_uses"]) - 1
+            apply_condition_effects(self.player, {"thirst": 25})
+            self.sync_barrel_sprite_state(data)
+            obj.state = data
+            self.log("Drank from the barrel (25 Thirst recovered).")
         elif action == "Weave Fiber Basket":
             self.consume_interaction_cost(obj, action)
             created = self.interaction_definition(obj, action).get("creates", {})
@@ -3184,6 +4346,8 @@ class Game:
             grains_before = self.player.inventory["grains"]
             self.grant_interaction_loot(obj, action)
             grains_gathered = self.player.inventory["grains"] - grains_before
+            self.award_skill_experience("harvesting")
+            self.quests.record_event("wheat_harvested", grains_gathered)
             obj.active = False
             located = self.map.tile_map.tile_at_world(*obj.center)
             self.unlock("First Harvest")
@@ -3199,6 +4363,7 @@ class Game:
                 str(created["type"]),
                 quality=int(created.get("quality", 10)),
             )
+            self.quests.record_event("homemade_food_prepared")
             self.log("Prepared a terrible bowl of porridge.")
         elif action in {"Eat Porridge", "Eat Berries"}:
             definition = self.interaction_definition(obj, action)
@@ -3217,17 +4382,53 @@ class Game:
             )
             if food is None:
                 return
-            self.player.hunger = min(100, self.player.hunger + food.nutrition)
-            food.active = False
-            food.container = None
-            self.player.carried_objects.remove(food)
+            self.consume_carried_food(food, "at the table")
+        elif action == "Power Nap":
+            apply_condition_effects(
+                self.player, {"fatigue": float(obj.quality)}
+            )
             self.log(
-                f"Ate the {food.name.lower()} at the table "
-                f"(+{food.nutrition} nutrition)."
+                f"Power nap complete ({obj.quality} Fatigue recovered)."
             )
         elif action == "Sleep":
             self.unlock("Homecoming")
+            self.player.last_sleep_id = obj.object_id
             self.begin_day_transition()
+
+    def consume_carried_food(self, food: WorldObject, location: str) -> None:
+        recovery = (
+            food.condition_recovery
+            if food.condition_recovery
+            else {"hunger": float(food.nutrition)}
+        )
+        lethal = apply_condition_effects(self.player, recovery)
+        self.quests.record_event("food_eaten")
+        self.quests.record_event(
+            "health_recovered",
+            round(sum(max(0.0, float(value)) for value in recovery.values())),
+        )
+        food.active = False
+        food.container = None
+        self.player.carried_objects.remove(food)
+        if food.type_id == "porridge":
+            self.quests.record_event("homemade_food_eaten")
+        effects = ", ".join(
+            f"{key} {value:+g}" for key, value in recovery.items() if value
+        )
+        self.log(f"Ate the {food.name.lower()} {location} ({effects}).")
+        if lethal:
+            self.log("The food was lethal. Night closes in.")
+            self.begin_day_transition()
+
+    def sync_controlled_character(self) -> None:
+        character = self.map.characters.get(self.player.character_id)
+        if character is None:
+            return
+        character.conditions = dict(self.player.conditions)
+        character.condition_memory = dict(self.player.condition_memory)
+        character.skills = self.player.skills
+        character.last_sleep_id = self.player.last_sleep_id
+        character.used_nap_windows = set(self.player.used_nap_windows)
 
     def interaction_definition(
         self, obj: WorldObject, action: str
@@ -3260,6 +4461,7 @@ class Game:
             },
             capacity=form.capacity_for(quality),
             nutrition=form.nutrition,
+            condition_recovery=dict(form.condition_recovery),
             type_id=type_id,
             quality=quality,
             variant=definition.default_variant,
@@ -3507,7 +4709,7 @@ class Game:
             form.footprint[0] * self.map.tile_map.tile_size,
             form.footprint[1] * self.map.tile_map.tile_size,
         )
-        if obj.orientation == "N/S":
+        if obj.orientation in {"N", "S", "N/S"}:
             width, height = height, width
         obj.width = width
         obj.height = height
@@ -3564,6 +4766,7 @@ class Game:
                 },
                 capacity=form.capacity_for(20),
                 nutrition=form.nutrition,
+                condition_recovery=dict(form.condition_recovery),
                 type_id=definition.type_id,
                 quality=20,
                 form=definition.default_form,
@@ -3625,6 +4828,7 @@ class Game:
                 },
                 capacity=form.capacity_for(20),
                 nutrition=form.nutrition,
+                condition_recovery=dict(form.condition_recovery),
                 type_id=type_id,
                 quality=20,
                 form=definition.default_form,
@@ -3679,7 +4883,64 @@ class Game:
     def begin_day_transition(self) -> None:
         if self.day_transition_phase is not None:
             return
-        self.day_transition_phase = "fade_out"
+        if len(self.day_position_history) > 1:
+            route = list(self.day_position_history)
+            bedtime_state = self.capture_transition_state()
+            bedtime_objects = self.object_persistence_signatures()
+            bedtime_tiles = self.tile_persistence_signatures()
+            previous_dawn_objects = self.dawn_object_signatures
+            previous_dawn_tiles = self.dawn_tile_signatures
+            if not self.finish_day():
+                return
+            next_dawn_objects = self.object_persistence_signatures()
+            next_dawn_tiles = self.tile_persistence_signatures()
+            self.rewind_flashing_objects = {
+                object_id
+                for object_id, bedtime in bedtime_objects.items()
+                if previous_dawn_objects.get(object_id) != bedtime
+                and next_dawn_objects.get(object_id) == bedtime
+                and self.objects.get(object_id) is not None
+                and self.objects[object_id].active
+            }
+            self.rewind_flashing_tiles = {
+                position
+                for position, bedtime in bedtime_tiles.items()
+                if previous_dawn_tiles.get(position) != bedtime
+                and next_dawn_tiles.get(position) == bedtime
+            }
+            self.rewind_persistent_objects = {
+                object_id: copy.deepcopy(self.objects[object_id])
+                for object_id in self.rewind_flashing_objects
+            }
+            self.rewind_persistent_tiles = {}
+            for position in self.rewind_flashing_tiles:
+                tile = self.map.tile_map.tile_at(*position)
+                if tile is not None:
+                    self.rewind_persistent_tiles[position] = (
+                        tile.kind,
+                        tuple(tile.properties),
+                        copy.deepcopy(self.map.tile_states.get(position)),
+                    )
+            self.dawn_transition_state = self.capture_transition_state()
+            self.restore_transition_state(bedtime_state)
+            remembered_count = (
+                len(self.rewind_flashing_objects)
+                + len(self.rewind_flashing_tiles)
+            )
+            if remembered_count:
+                self.log(
+                    f"Memory held {remembered_count} changed "
+                    f"{'thing' if remembered_count == 1 else 'things'} through dawn."
+                )
+            self.day_position_history = route
+            self.player.x, self.player.y = route[-1]
+            self.day_transition_prepared = True
+            self.day_transition_phase = "rewind"
+            self.rewind_cursor = float(len(self.day_position_history) - 1)
+            self.rewind_speed = REWIND_START_SAMPLES_PER_SECOND
+            self.rewind_checkpoint_index = len(self.rewind_checkpoints) - 1
+        else:
+            self.day_transition_phase = "fade_out"
         self.day_transition_progress = 0.0
         self.simulation_paused = True
 
@@ -3928,14 +5189,33 @@ class Game:
                 tree.persistent_state.state = encode_tree_state(baseline)
 
     def update_day_transition(self, dt: float) -> None:
+        if self.day_transition_phase == "planner":
+            return
+        if self.day_transition_phase == "rewind":
+            self.update_day_rewind(dt)
+            return
+        duration = (
+            MORNING_OPENING_FADE_SECONDS
+            if self.day_transition_phase == "fade_in"
+            else DAY_FADE_DURATION_SECONDS
+        )
         self.day_transition_progress = min(
-            1.0, self.day_transition_progress + dt / DAY_FADE_DURATION_SECONDS
+            1.0, self.day_transition_progress + dt / duration
         )
         if self.day_transition_progress < 1.0:
             return
         if self.day_transition_phase == "fade_out":
-            if self.finish_day():
-                self.day_transition_phase = "fade_in"
+            if self.day_transition_prepared or self.finish_day():
+                if (
+                    self.day_transition_prepared
+                    and self.dawn_transition_state is not None
+                ):
+                    self.restore_transition_state(self.dawn_transition_state)
+                self.day_transition_prepared = False
+                self.dawn_transition_state = None
+                self.rewind_checkpoints.clear()
+                self.rewind_checkpoint_index = -1
+                self.day_transition_phase = "planner"
                 self.day_transition_progress = 0.0
             else:
                 self.day_transition_phase = None
@@ -3944,13 +5224,50 @@ class Game:
             self.day_transition_phase = None
             self.day_transition_progress = 0.0
 
+    def update_day_rewind(self, dt: float) -> None:
+        """Run the recorded route backwards, accelerating toward dawn."""
+        self.rewind_speed += (
+            REWIND_ACCELERATION_SAMPLES_PER_SECOND_SQUARED * dt
+        )
+        self.rewind_cursor = max(0.0, self.rewind_cursor - self.rewind_speed * dt)
+        while (
+            self.rewind_checkpoint_index >= 0
+            and self.rewind_cursor
+            <= self.rewind_checkpoints[self.rewind_checkpoint_index][0]
+        ):
+            _sample, action, snapshot = self.rewind_checkpoints[
+                self.rewind_checkpoint_index
+            ]
+            self.restore_rewind_checkpoint(snapshot)
+            self.log(f"Rewound: {action}.")
+            self.rewind_checkpoint_index -= 1
+        lower = int(self.rewind_cursor)
+        upper = min(lower + 1, len(self.day_position_history) - 1)
+        fraction = self.rewind_cursor - lower
+        start = self.day_position_history[lower]
+        end = self.day_position_history[upper]
+        self.player.x = start[0] + (end[0] - start[0]) * fraction
+        self.player.y = start[1] + (end[1] - start[1]) * fraction
+        total = max(1, len(self.day_position_history) - 1)
+        self.day_transition_progress = 1.0 - self.rewind_cursor / total
+        if self.rewind_cursor <= 0.0:
+            self.day_transition_phase = "fade_out"
+            self.day_transition_progress = 0.0
+
     def finish_day(self) -> bool:
+        quest_state_before_dawn = self.quests.state_data()
         if (
             self.day.mode is Mode.DIRECT
             and self.day.today_routine
             and not self.auto_cheat_memory
         ):
             self.day.remembered_routine = list(self.day.today_routine)
+        self.quests.record_bedtime(self.player.conditions)
+        learn_dawn_conditions(self.player)
+        self.sync_controlled_character()
+        self.quests.record_event("days_survived")
+        for message in self.quests.update(self.player, self.day):
+            self.log(message)
         try:
             advance_level_tile_states(
                 self.map.tile_states,
@@ -3968,12 +5285,26 @@ class Game:
                 tile_states=self.map.tile_states,
                 remembered_routine=self.day.remembered_routine,
                 build_memories=self.build_memories,
+                quest_state=self.quests.state_data(),
+                characters=self.map.characters,
+                controlled_character_id=self.map.controlled_character_id,
             )
             next_day_map = load_map(
                 persistence_path=self.persistence_path,
                 day_number=self.day.number + 1,
                 reset_for_morning=True,
             )
+            next_character = next_day_map.characters.get(self.player.character_id)
+            if next_character is not None:
+                next_character.conditions = dict(next_character.condition_memory)
+                sleep_object = next_day_map.objects[next_character.last_sleep_id]
+                next_character.conditions["fatigue"] = max(
+                    0.0, min(99.0, 100.0 - sleep_object.quality)
+                )
+                next_character.used_nap_windows.clear()
+                self.quests.record_start_day(next_character.conditions)
+            else:
+                self.quests.record_start_day(self.player.conditions)
             save_persistent_objects(
                 next_day_map.objects,
                 self.persistence_path,
@@ -3981,8 +5312,12 @@ class Game:
                 tile_states=next_day_map.tile_states,
                 remembered_routine=self.day.remembered_routine,
                 build_memories=next_day_map.build_memories,
+                quest_state=self.quests.state_data(),
+                characters=next_day_map.characters,
+                controlled_character_id=next_day_map.controlled_character_id,
             )
         except (MapLoadError, ObjectPersistenceError) as exc:
+            self.quests.restore_state(quest_state_before_dawn)
             self.log(f"Could not finish the day: {exc}")
             return False
         self.map = next_day_map
@@ -3994,6 +5329,13 @@ class Game:
         ]
         self.storage_memories = self.load_storage_memories()
         self.restore_persistent_tools()
+        character = self.map.characters.get(self.player.character_id)
+        if character is not None:
+            self.player.conditions = dict(character.conditions)
+            self.player.condition_memory = dict(character.condition_memory)
+            self.player.skills = character.skills
+            self.player.last_sleep_id = character.last_sleep_id
+            self.player.used_nap_windows = set(character.used_nap_windows)
         self.day.number += 1
         self.day.mode = Mode.MORNING
         self.day.today_routine.clear()
@@ -4001,10 +5343,11 @@ class Game:
         self.day.current_time_minutes = START_OF_DAY_MINUTES
         self.time_accumulator = 0.0
         self.menu_index = 0
-        self.player.energy = 100
-        self.player.hunger = max(0, self.player.hunger - 25)
         self.player.inventory.clear()
         self.player.x, self.player.y = self.player_spawn()
+        self.day_position_history = [(self.player.x, self.player.y)]
+        self.rewind_cursor = 0.0
+        self.rewind_speed = REWIND_START_SAMPLES_PER_SECOND
         self.navigation_path = []
         self.preview_path = []
         self.walk_target = None
@@ -4022,7 +5365,52 @@ class Game:
         self.selected_id = None
         self.selected_tile = None
         self.log(f"Day {self.day.number}. Yesterday's completed jobs are remembered.")
+        self.dawn_object_signatures = self.object_persistence_signatures()
+        self.dawn_tile_signatures = self.tile_persistence_signatures()
         return True
+
+    def object_persistence_signatures(self) -> dict[int, tuple[object, ...]]:
+        persistence_only_fields = {
+            "build_count",
+            "built_today",
+            "persistence_modifier",
+            "stump_memory_count",
+            "water_memory",
+        }
+        return {
+            object_id: (
+                obj.active,
+                obj.x,
+                obj.y,
+                obj.orientation,
+                obj.quality,
+                obj.variant,
+                obj.form,
+                obj.container,
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in obj.state.items()
+                        if key not in persistence_only_fields
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+            for object_id, obj in self.objects.items()
+        }
+
+    def tile_persistence_signatures(
+        self,
+    ) -> dict[tuple[int, int], tuple[object, ...]]:
+        signatures: dict[tuple[int, int], tuple[object, ...]] = {}
+        for row in range(self.map.tile_map.rows):
+            for column in range(self.map.tile_map.columns):
+                tile = self.map.tile_map.tile_at(column, row)
+                signatures[(column, row)] = (
+                    tile.kind if tile is not None else None,
+                )
+        return signatures
 
     def unlock(self, name: str) -> None:
         if name not in self.player.achievements:
@@ -4031,18 +5419,25 @@ class Game:
 
     def log(self, message: str) -> None:
         self.messages.append(message)
-        self.messages = self.messages[-5:]
+        self.messages = self.messages[-MAX_MESSAGE_HISTORY:]
+        self.message_scroll_offset = 0
 
     def draw(self) -> None:
+        if self.adjusting_memory:
+            preview_position = self.command_editor_preview_position()
+            self._editor_camera_restore = (self.camera.x, self.camera.y)
+            self.camera.center_on(preview_position, (self.map.width, self.map.height))
         self.screen.fill((76, 104, 74))
         self.screen.set_clip(MAP_VIEWPORT)
         self.draw_tiles()
+        self.draw_boundaries()
         self.draw_room_labels()
         self.draw_objects()
         self.draw_command_selection()
         self.draw_path()
-        self.draw_player()
-        self.draw_thought_bubble()
+        if not self.adjusting_memory:
+            self.draw_player()
+            self.draw_thought_bubble()
         self.screen.set_clip(None)
         self.draw_top_bar()
         self.draw_ui()
@@ -4058,6 +5453,27 @@ class Game:
     def draw_day_transition(self) -> None:
         if self.day_transition_phase is None:
             return
+        if self.day_transition_phase == "rewind":
+            self.draw_rewind_vcr_effect()
+            overlay = pygame.Surface(MAP_VIEWPORT.size, pygame.SRCALPHA)
+            pulse = 28 + round(20 * self.day_transition_progress)
+            overlay.fill((42, 62, 96, pulse))
+            self.screen.blit(overlay, MAP_VIEWPORT.topleft)
+            label = self.title_font.render(
+                f"REWIND  {self.rewind_speed:.0f}x", True, (225, 235, 255)
+            )
+            self.screen.blit(
+                label,
+                (
+                    MAP_VIEWPORT.centerx - label.get_width() // 2,
+                    MAP_VIEWPORT.top + 28,
+                ),
+            )
+            return
+        if self.day_transition_phase == "planner":
+            self.screen.fill((0, 0, 0))
+            self.draw_morning_menu()
+            return
         alpha = round(
             255 * (
                 self.day_transition_progress
@@ -4068,49 +5484,127 @@ class Game:
         overlay = pygame.Surface(MAP_VIEWPORT.size, pygame.SRCALPHA)
         overlay.fill((0, 0, 0, alpha))
         self.screen.blit(overlay, MAP_VIEWPORT.topleft)
+        if self.day_transition_phase == "fade_in":
+            self.draw_wake_status(alpha)
+
+    def draw_rewind_vcr_effect(self) -> None:
+        """Distort the map like a worn tape without touching simulation state."""
+        source = self.screen.subsurface(MAP_VIEWPORT).copy()
+        phase = self.day_transition_progress * 37.0 + self.rewind_cursor * 0.071
+
+        # A few displaced horizontal strips give the characteristic frame tear.
+        for index, height in enumerate((7, 13, 5, 19)):
+            wave = math.sin(phase * (1.3 + index * 0.23) + index * 2.1)
+            y_range = max(1, MAP_VIEWPORT.height - height)
+            y = int((phase * (47 + index * 29) + index * 113) % y_range)
+            shift = round(wave * (5 + index * 3))
+            strip = source.subsurface(pygame.Rect(0, y, MAP_VIEWPORT.width, height))
+            self.screen.blit(strip, (MAP_VIEWPORT.left + shift, MAP_VIEWPORT.top + y))
+
+        artifacts = pygame.Surface(MAP_VIEWPORT.size, pygame.SRCALPHA)
+        # Alternating scanlines and two rolling tracking bands remain cheap to draw.
+        scan_alpha = 18 + round(10 * abs(math.sin(phase)))
+        for y in range(0, MAP_VIEWPORT.height, 4):
+            pygame.draw.line(artifacts, (8, 12, 20, scan_alpha), (0, y), (MAP_VIEWPORT.width, y))
+        for index in range(2):
+            y = int((phase * (73 + index * 31) + index * 181) % MAP_VIEWPORT.height)
+            pygame.draw.rect(artifacts, (220, 230, 255, 34), (0, y, MAP_VIEWPORT.width, 3))
+            pygame.draw.rect(artifacts, (20, 28, 45, 54), (0, min(y + 4, MAP_VIEWPORT.height - 1), MAP_VIEWPORT.width, 8))
+
+        # Offset cyan/red edges imply chromatic separation without per-pixel work.
+        edge_alpha = 28 + round(18 * abs(math.cos(phase * 0.7)))
+        pygame.draw.line(artifacts, (80, 220, 235, edge_alpha), (2, 0), (2, MAP_VIEWPORT.height))
+        pygame.draw.line(artifacts, (235, 70, 90, edge_alpha), (MAP_VIEWPORT.width - 3, 0), (MAP_VIEWPORT.width - 3, MAP_VIEWPORT.height))
+        self.screen.blit(artifacts, MAP_VIEWPORT.topleft)
+
+    def wake_status_segments(
+        self,
+    ) -> list[tuple[str, pygame.font.Font, tuple[int, int, int]]]:
+        segments = [("You wake up ", self.wake_fonts["plain"], (238, 238, 228))]
+        character_type = self.map.character_types.get(
+            self.map.characters.get(self.player.character_id).type_id
+            if self.player.character_id in self.map.characters
+            else ""
+        )
+        if character_type is None:
+            return segments
+        descriptor_segments: list[
+            tuple[str, pygame.font.Font, tuple[int, int, int]]
+        ] = []
+        for condition_id in ("trauma", "fatigue", "thirst", "hunger"):
+            row = condition_descriptor(
+                character_type.conditions.get(condition_id, {}),
+                self.player.conditions.get(condition_id, 0.0),
+            )
+            if row is None:
+                continue
+            color_value = row.get("color", [238, 238, 228])
+            color = (
+                tuple(int(component) for component in color_value)
+                if isinstance(color_value, list) and len(color_value) == 3
+                else (238, 238, 228)
+            )
+            font = self.wake_fonts.get(str(row.get("font", "plain")), self.wake_fonts["plain"])
+            descriptor_segments.append((str(row["text"]), font, color))
+        for index, segment in enumerate(descriptor_segments):
+            if index:
+                separator = (
+                    ", and " if index == len(descriptor_segments) - 1 else ", "
+                )
+                segments.append(
+                    (separator, self.wake_fonts["plain"], (238, 238, 228))
+                )
+            segments.append(segment)
+        segments.append((".", self.wake_fonts["plain"], (238, 238, 228)))
+        return segments
+
+    def draw_wake_status(self, overlay_alpha: int) -> None:
+        # Keep the message strongest while the world is still concealed.
+        text_alpha = min(255, overlay_alpha * 2)
+        rendered = [
+            (font.render(text, True, color), font)
+            for text, font, color in self.wake_status_segments()
+        ]
+        total_width = sum(surface.get_width() for surface, _font in rendered)
+        x = MAP_VIEWPORT.centerx - total_width // 2
+        baseline = MAP_VIEWPORT.centery
+        for surface, font in rendered:
+            surface.set_alpha(text_alpha)
+            y = baseline - font.get_ascent() // 2
+            self.screen.blit(surface, (x, y))
+            x += surface.get_width()
 
     def draw_top_bar(self) -> None:
         panel = pygame.Rect(0, 0, WIDTH, TOP_BAR_HEIGHT)
         pygame.draw.rect(self.screen, (34, 40, 45), panel)
         pygame.draw.rect(self.screen, (188, 170, 105), panel, 2)
-        self.text("Day", (12, 12), self.small_font)
-        self.text(f"{self.day.number}", (44, 12), self.small_font)
         time_area = pygame.Rect(MAP_LEFT, 0, MAP_RIGHT - MAP_LEFT, TOP_BAR_HEIGHT)
-        speed_button_gap = 4
-        speed_button_widths = [
-            max(45, self.small_font.size(label)[0] + 10)
-            for label, _ in TIME_SPEED_OPTIONS
-        ]
-        speed_controls_width = (
-            sum(speed_button_widths)
-            + (len(TIME_SPEED_OPTIONS) - 1) * speed_button_gap
+        time_background = pygame.Rect(time_area.x + 8, 2, 148, 24)
+        pygame.draw.rect(
+            self.screen, (34, 40, 45), time_background, border_radius=3
         )
-        track_width = (
-            time_area.width
-            - 96  # fixed time display and its gap
-            - 16  # gap between sun track and pause
-            - 58  # pause button
-            - 4   # gap after pause
-            - speed_controls_width
-            - 8   # right inset
+        time_surface = self.small_font.render(
+            f"Day {self.day.number}  {format_clock_time(self.day.current_time_minutes)}",
+            True,
+            (238, 238, 228),
         )
-        track_x = time_area.x + 96
-        track_y = 12
+        self.screen.blit(
+            time_surface, time_surface.get_rect(center=time_background.center)
+        )
+
+        controls_width = 58 + 4 + 58 + 4 + 28 + 2 + 52 + 2 + 28
+        track_x = time_background.right + 8
+        track_width = time_area.right - track_x - controls_width - 12
+        track_y = 5
         pygame.draw.rect(self.screen, (84, 93, 98), (track_x, track_y, track_width, 18))
         progress = day_progress_ratio(self.day.current_time_minutes)
         sun_x = sun_track_position(progress, track_x, track_width)
         filled_width = sun_x - track_x
         pygame.draw.rect(self.screen, (234, 180, 84), (track_x, track_y, filled_width, 18))
-        time_surface = self.small_font.render(
-            format_clock_time(self.day.current_time_minutes), True, (238, 238, 228)
-        )
-        time_background = pygame.Rect(time_area.x + 8, 8, 80, 28)
-        pygame.draw.rect(self.screen, (34, 40, 45), time_background, border_radius=3)
-        self.screen.blit(time_surface, time_surface.get_rect(center=time_background.center))
         pygame.draw.circle(self.screen, (255, 220, 120), (sun_x, track_y + 9), 8)
-        self.time_speed_buttons.clear()
-        button_x = track_x + track_width + 16
-        self.pause_button = pygame.Rect(button_x, 8, 58, 28)
+
+        button_x = track_x + track_width + 8
+        self.pause_button = pygame.Rect(button_x, 2, 58, 24)
         pygame.draw.rect(
             self.screen,
             (205, 194, 126) if self.simulation_paused else (74, 82, 87),
@@ -4122,17 +5616,40 @@ class Game:
         rendered = self.small_font.render(pause_label, True, (232, 232, 222))
         self.screen.blit(rendered, rendered.get_rect(center=self.pause_button.center))
         button_x += 62
-        for (label, speed), button_width in zip(
-            TIME_SPEED_OPTIONS, speed_button_widths
+        self.step_button = pygame.Rect(button_x, 2, 58, 24)
+        pygame.draw.rect(
+            self.screen,
+            (205, 194, 126) if self.single_step_active else (74, 82, 87),
+            self.step_button,
+            border_radius=3,
+        )
+        pygame.draw.rect(self.screen, (117, 124, 128), self.step_button, 1, border_radius=3)
+        rendered = self.small_font.render("1 Cmd", True, (232, 232, 222))
+        self.screen.blit(rendered, rendered.get_rect(center=self.step_button.center))
+        button_x += 62
+
+        self.speed_down_button = pygame.Rect(button_x, 2, 28, 24)
+        self.speed_display = pygame.Rect(button_x + 30, 2, 52, 24)
+        self.speed_up_button = pygame.Rect(button_x + 84, 2, 28, 24)
+        for rect, label in (
+            (self.speed_down_button, "−"),
+            (
+                self.speed_display,
+                next(
+                    (
+                        label
+                        for label, speed in TIME_SPEED_OPTIONS
+                        if speed == self.time_speed
+                    ),
+                    f"{self.time_speed:g}x",
+                ),
+            ),
+            (self.speed_up_button, "+"),
         ):
-            rect = pygame.Rect(button_x, 8, button_width, 28)
-            selected = speed == self.time_speed
-            pygame.draw.rect(self.screen, (205, 194, 126) if selected else (74, 82, 87), rect, border_radius=3)
-            pygame.draw.rect(self.screen, (238, 220, 132) if selected else (117, 124, 128), rect, 1, border_radius=3)
-            rendered = self.small_font.render(label, True, (30, 32, 33) if selected else (232, 232, 222))
+            pygame.draw.rect(self.screen, (74, 82, 87), rect, border_radius=3)
+            pygame.draw.rect(self.screen, (117, 124, 128), rect, 1, border_radius=3)
+            rendered = self.small_font.render(label, True, (232, 232, 222))
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
-            self.time_speed_buttons.append((rect, speed))
-            button_x += button_width + speed_button_gap
 
     def draw_tiles(self) -> None:
         tile_map = self.map.tile_map
@@ -4172,15 +5689,11 @@ class Game:
             ),
         )
         scaled_size = max(1, round(tile_map.tile_size * self.camera.effective_zoom))
-        wall_width = max(
-            1, round(4 * self.world_scale * self.camera.effective_zoom)
-        )
         room_colors = {
             room.structure_id: room.display_color
             for room in self.map.structures
             if room.display_color is not None
         }
-        visible_tiles: list[tuple[Tile, pygame.Rect]] = []
         for row in range(first_row, last_row + 1):
             for column in range(first_column, last_column + 1):
                 tile = tile_map.tile_at(column, row)
@@ -4197,24 +5710,107 @@ class Game:
                     if room_property is not None:
                         color = room_colors.get(room_property.removeprefix("room:"), color)
                 pygame.draw.rect(self.screen, color, rect)
-                visible_tiles.append((tile, rect))
-
-        # Walls are a separate top layer. Drawing them during the fill pass lets
-        # later neighboring tile rectangles cover south and west boundaries.
-        for tile, rect in visible_tiles:
-            if tile.kind is TileKind.WOODEN_FLOOR:
-                self.draw_tile_edges(tile, rect, wall_width)
-
-    def draw_tile_edges(self, tile, rect: pygame.Rect, width: int) -> None:
-        color = (48, 42, 37)
-        if "wall:north" in tile.properties:
-            pygame.draw.line(self.screen, color, rect.topleft, rect.topright, width)
-        if "wall:east" in tile.properties:
-            pygame.draw.line(self.screen, color, rect.topright, rect.bottomright, width)
-        if "wall:south" in tile.properties:
-            pygame.draw.line(self.screen, color, rect.bottomleft, rect.bottomright, width)
-        if "wall:west" in tile.properties:
-            pygame.draw.line(self.screen, color, rect.topleft, rect.bottomleft, width)
+                tile_sprite = self.tile_sprites.image_for(tile.kind.value)
+                if tile_sprite is not None:
+                    self.screen.blit(
+                        pygame.transform.scale(tile_sprite, rect.size), rect.topleft
+                    )
+                state = self.map.tile_states.get((column, row))
+                for overlay in self.map.tile_sprite_overlays.get(tile.kind.value, ()):
+                    alpha = overlay_alpha(overlay, state)
+                    if alpha <= 0:
+                        continue
+                    layer = self.tile_sprites.image_for(
+                        tile.kind.value, overlay.overlay_id
+                    )
+                    if layer is None:
+                        continue
+                    layer = pygame.transform.scale(layer, rect.size)
+                    layer.set_alpha(alpha)
+                    self.screen.blit(layer, rect.topleft)
+                if (
+                    self.day_transition_phase == "rewind"
+                    and (column, row) in self.rewind_flashing_tiles
+                ):
+                    flash = (
+                        math.sin(pygame.time.get_ticks() / 95.0) + 1.0
+                    ) / 2.0
+                    glow = pygame.Surface(rect.size, pygame.SRCALPHA)
+                    glow.fill((255, 244, 150, round(45 + 125 * flash)))
+                    self.screen.blit(glow, rect.topleft)
+                    pygame.draw.rect(
+                        self.screen,
+                        (255, 248, 180),
+                        rect,
+                        max(1, round(2 * self.camera.effective_zoom)),
+                    )
+    def draw_boundaries(self) -> None:
+        """Draw edge sprites, retaining geometry placeholders for missing assets."""
+        authored: dict[tuple[int, int, str], BoundaryObject] = {
+            (item.column, item.row, item.edge): item for item in self.map.boundaries
+        }
+        size = self.map.tile_map.tile_size
+        def draw_key(boundary):
+            return (boundary.edge == "west", boundary.row, boundary.column)
+        colors = {"wall": (58, 48, 40), "fence": (126, 86, 48), "door": (176, 120, 58)}
+        for boundary in sorted(authored.values(), key=draw_key):
+            vertical = boundary.edge == "west"
+            draw_column = boundary.column
+            draw_row = boundary.row
+            if boundary.kind == "door" and boundary.open:
+                # Door sprites are authored closed, hinge-left, with the leaf
+                # extending east. Opening swings the leaf 90 degrees CCW about
+                # that hinge: north -> west above; west -> north to the right.
+                counterclockwise = boundary.swing != "clockwise"
+                if vertical:
+                    vertical = False
+                    if not counterclockwise:
+                        draw_column -= 1
+                        draw_row += 1
+                else:
+                    vertical = True
+                    if counterclockwise:
+                        draw_row -= 1
+                    else:
+                        draw_column += 1
+            thickness = size * 8 / 64
+            target_size = (thickness, size) if vertical else (size, thickness)
+            scaled_size = (
+                max(1, round(target_size[0] * self.camera.effective_zoom)),
+                max(1, round(target_size[1] * self.camera.effective_zoom)),
+            )
+            world_x = draw_column * size
+            world_y = draw_row * size
+            screen_x, screen_y = self.camera.world_to_screen((world_x, world_y))
+            rect = pygame.Rect(0, 0, *scaled_size)
+            rect.center = round(screen_x), round(screen_y)
+            if vertical:
+                rect.centery = round(screen_y + size * self.camera.effective_zoom / 2)
+            else:
+                rect.centerx = round(screen_x + size * self.camera.effective_zoom / 2)
+            source = self.boundary_sprites.image_for(boundary.kind)
+            if source is not None:
+                if vertical:
+                    angle = (
+                        90
+                        if boundary.kind == "door"
+                        and boundary.open
+                        and boundary.swing != "clockwise"
+                        else -90
+                    )
+                    source = pygame.transform.rotate(source, angle)
+                elif (
+                    boundary.kind == "door"
+                    and boundary.open
+                    and boundary.swing == "clockwise"
+                    and boundary.edge == "west"
+                ):
+                    source = pygame.transform.rotate(source, 180)
+                sprite = pygame.transform.scale(source, rect.size)
+                self.screen.blit(sprite, rect)
+                continue
+            color = colors[boundary.kind]
+            pygame.draw.rect(self.screen, color, rect)
 
     def draw_room_labels(self) -> None:
         for structure in self.map.structures:
@@ -4245,6 +5841,22 @@ class Game:
             border_color = (245, 225, 120) if selected else (35, 35, 35)
             show_border = selected
             if (
+                self.day_transition_phase == "rewind"
+                and obj.object_id in self.rewind_flashing_objects
+            ):
+                flash = (
+                    math.sin(pygame.time.get_ticks() / 95.0) + 1.0
+                ) / 2.0
+                show_border = True
+                border_color = (
+                    255,
+                    round(205 + 45 * flash),
+                    round(90 + 90 * flash),
+                )
+                border = max(
+                    border, max(2, round((3 + 3 * flash) * self.camera.zoom))
+                )
+            if (
                 obj.kind is ObjectKind.WORKBENCH
                 and not selected
                 and bool(available_actions(obj, self.player))
@@ -4262,6 +5874,25 @@ class Game:
             loaded_sprite = self.object_sprites.sprite_for(obj, definition)
             if loaded_sprite is not None:
                 sprite = loaded_sprite.image
+                form = definition.form_definition(obj.form, obj.variant)
+                for overlay in form.sprite_overlays:
+                    alpha = overlay_alpha(overlay, obj.state, obj.capacity)
+                    if alpha <= 0:
+                        continue
+                    loaded_overlay = self.object_sprites.overlay_for(
+                        obj, definition, overlay.overlay_id
+                    )
+                    if loaded_overlay is None:
+                        continue
+                    layer = loaded_overlay.image
+                    if layer.get_size() != sprite.get_size():
+                        layer = pygame.transform.scale(layer, sprite.get_size())
+                    else:
+                        layer = layer.copy()
+                    layer.set_alpha(alpha)
+                    if sprite is loaded_sprite.image:
+                        sprite = sprite.copy()
+                    sprite.blit(layer, (0, 0))
                 if loaded_sprite.anchor.mode == "random_within_tile":
                     margin = loaded_sprite.anchor.margin
                     margin = 0.2 if margin is None else margin
@@ -4270,9 +5901,17 @@ class Game:
                     margin = None
                     placement_x, placement_y = 0.5, 0.5
                     anchor_x, anchor_y = loaded_sprite.anchor.point or (0.5, 0.5)
-                if obj.orientation == "N/S" and obj.width != obj.height:
-                    sprite = pygame.transform.rotate(sprite, 90)
-                    anchor_x, anchor_y = anchor_y, 1.0 - anchor_x
+                orientation_angle = {"E": 0, "E/W": 0, "S": -90, "W": 180, "N": 90, "N/S": 90}.get(
+                    obj.orientation, 0
+                )
+                if orientation_angle:
+                    sprite = pygame.transform.rotate(sprite, orientation_angle)
+                    if orientation_angle == 90:
+                        anchor_x, anchor_y = anchor_y, 1.0 - anchor_x
+                    elif orientation_angle == -90:
+                        anchor_x, anchor_y = 1.0 - anchor_y, anchor_x
+                    else:
+                        anchor_x, anchor_y = 1.0 - anchor_x, 1.0 - anchor_y
                 if loaded_sprite.rotation_angles:
                     rotation_randomizer = random.Random(
                         f"remembering:sprite-rotation:{obj.type_id}:{obj.object_id}"
@@ -4458,19 +6097,13 @@ class Game:
             max(2, round(8 * visual_zoom)),
         )
         pygame.draw.arc(self.screen, (35, 35, 35), mouth_rect, 0, math.pi, outline)
-        if self.pending_job:
-            self.world_text(
-                self.pending_job.action,
-                (self.player.x - 35, self.player.y - 35),
-                self.small_font,
-            )
-
     def draw_thought_bubble(self) -> None:
-        if self.thought_bubble_text is None:
+        bubble_text = self.work_thought_text() or self.thought_bubble_text
+        if bubble_text is None:
             return
         px, py = self.camera.world_to_screen((self.player.x, self.player.y))
         lines = wrap_text(
-            self.thought_bubble_text,
+            bubble_text,
             self.small_font,
             min(420, MAP_VIEWPORT.width - 40),
         )
@@ -4510,66 +6143,370 @@ class Game:
                 ),
             )
 
+    def draw_player_dock(self) -> None:
+        self.inventory_food_buttons.clear()
+        layout = player_dock_layout(
+            equipment_collapsed=self.equipment_collapsed
+        )
+        panel_color = (31, 35, 38)
+        border_color = (92, 95, 101)
+        for rect in (layout.player_info, layout.equipment, layout.inventory):
+            pygame.draw.rect(self.screen, panel_color, rect)
+            pygame.draw.rect(self.screen, border_color, rect, 2)
+
+        content_x = layout.player_info.x + 12
+        right_column_x = layout.player_info.x + layout.player_info.width // 2 + 8
+        self.text("Conditions", (content_x, 14), self.small_font, (172, 176, 182))
+        self.text("Stats", (right_column_x, 14), self.small_font, (172, 176, 182))
+        for index, condition_id in enumerate(CONDITION_IDS):
+            value = self.player.conditions[condition_id]
+            if condition_id != "trauma" or critical_trauma_visible(
+                value, pygame.time.get_ticks()
+            ):
+                self.text(
+                    f"{CONDITION_LABELS[condition_id]}: "
+                    f"{round(value)}",
+                    (content_x, 44 + index * 28),
+                    self.small_font,
+                    condition_color(value),
+                )
+        self.text(
+            f"Movement: {movement_speed_multiplier(self.player) * 100:.1f}%",
+            (right_column_x, 44),
+            self.small_font,
+        )
+        self.text(
+            f"Task Speed: {task_speed_multiplier(self.player) * 100:.1f}%",
+            (right_column_x, 72),
+            self.small_font,
+        )
+        rate = healing_rate(self.player)
+        self.text(
+            f"Healing: {rate:+.2f}/hr",
+            (right_column_x, 100),
+            self.small_font,
+            (112, 198, 112) if rate > 0 else (235, 88, 88) if rate < 0 else (210, 214, 202),
+        )
+        self.text("Skills", (content_x, 174), self.small_font, (172, 176, 182))
+        for index, (skill_id, skill) in enumerate(
+            sorted(self.player.skills.items())
+        ):
+            per_level = float(
+                self.skill_config(skill_id).get("experience_per_level", 10.0)
+            )
+            current_xp = skill.experience - skill.level * per_level
+            self.text(
+                f"{skill_id.title()}: L{skill.level}  "
+                f"{current_xp:g}/{per_level:g} XP",
+                (content_x, 202 + index * 24),
+                self.small_font,
+            )
+
+        self.draw_equipment_inventory(layout, border_color)
+
+    def draw_selection_details(self, panel: pygame.Rect) -> None:
+        x = panel.x + 12
+        self.text("Selection", (x, panel.y + 12), self.font)
+        self.text(
+            "Selected object or tile",
+            (x, panel.y + 40),
+            self.small_font,
+            (172, 176, 182),
+        )
+        if self.selected_id is not None:
+            obj = self.objects[self.selected_id]
+            display_name = (
+                object_map_label(obj) if obj.kind is ObjectKind.TREE else obj.name
+            )
+            self.text(display_name, (x, panel.y + 68), self.font)
+            kind_label = obj.kind.name.lower().replace("_", " ").title()
+            self.text(
+                f"{kind_label} | {obj.quality_stage.title()}",
+                (x, panel.y + 96),
+                self.small_font,
+                (172, 176, 182),
+            )
+            lines = wrap_text(
+                obj.description, self.small_font, panel.width - 24
+            )
+            lines.extend(crop_inspection_lines(obj))
+            if "edible" in obj.traits:
+                lines.append(f"Nutrition: {obj.nutrition}")
+            if obj.kind is ObjectKind.CUPBOARD:
+                lines.append(
+                    f"Food stored: {len(obj.state.get('food_ids', []))}/"
+                    f"{obj.capacity.get('food', 0)}"
+                )
+            if obj.kind is ObjectKind.BARREL:
+                lines.append(
+                    f"Water: {self.barrel_state(obj)['water_uses']}/"
+                    f"{self.barrel_capacity} uses"
+                )
+            if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                lines.extend(self.object_persistence_details(obj))
+            for index, line in enumerate(lines):
+                y = panel.y + 124 + index * 20
+                if y + 20 >= panel.bottom:
+                    break
+                self.text(line, (x, y), self.small_font, (210, 214, 202))
+            return
+
+        if self.selected_tile is None:
+            self.text(
+                "Click an object or tile in the world to inspect it.",
+                (x, panel.y + 76),
+                self.small_font,
+                (210, 214, 202),
+            )
+            return
+        column, row = self.selected_tile
+        tile = self.map.tile_map.tile_at(column, row)
+        crop = self.crop_at_tile(column, row)
+        tile_name = (
+            tile.kind.value.replace("_", " ").title()
+            if tile is not None
+            else "Tile"
+        )
+        self.text(tile_name, (x, panel.y + 68), self.font)
+        lines = [f"Tile: {column}, {row}"]
+        if crop is None:
+            lines.append("Plant: none")
+        else:
+            lines.extend(
+                (
+                    f"Plant: {(crop.variant or crop.name).title()}",
+                    f"Form: {crop.form.title()}",
+                    f"Growth: {float(crop.state.get('growth_progress', 0.0)) * 100:.1f}%",
+                    f"Water: {float(crop.state.get('water', 0.0)):.1f}%",
+                    f"Tended: {float(crop.state.get('tended', 0.0)):.1f}%",
+                )
+            )
+        if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+            lines.extend(self.tile_persistence_details(column, row))
+        for index, line in enumerate(lines):
+            self.text(
+                line,
+                (x, panel.y + 100 + index * 22),
+                self.small_font,
+                (210, 214, 202),
+            )
+
+    def draw_equipment_inventory(
+        self, layout: PlayerDockLayout, border_color: tuple[int, int, int]
+    ) -> None:
+        self.text(
+            "Equipment",
+            (layout.equipment.x + 12, layout.equipment.y + 8),
+            self.small_font,
+            (172, 176, 182),
+        )
+        self.equipment_toggle_button = layout.equipment_toggle
+        pygame.draw.rect(
+            self.screen, (74, 82, 87), self.equipment_toggle_button, border_radius=3
+        )
+        pygame.draw.rect(
+            self.screen, border_color, self.equipment_toggle_button, 1, border_radius=3
+        )
+        toggle_label = "+" if self.equipment_collapsed else "−"
+        rendered = self.small_font.render(toggle_label, True, (232, 232, 222))
+        self.screen.blit(
+            rendered, rendered.get_rect(center=self.equipment_toggle_button.center)
+        )
+
+        if not self.equipment_collapsed:
+            hoe = (
+                f"{'carried' if self.player.carrying_hoe else 'stored'} "
+                f"(Q{self.player.hoe_quality})"
+                if self.player.has_hoe
+                else "none"
+            )
+            axe = (
+                "carried"
+                if self.player.carrying_axe
+                else "stored" if self.player.has_axe else "none"
+            )
+            bucket = (
+                f"{self.player.bucket_water_uses}/{self.bucket_capacity} uses"
+                if self.player.has_bucket
+                else "none"
+            )
+            basket = "carried" if self.player.has_basket else "none"
+            equipment_lines = (
+                f"Hoe: {hoe}",
+                f"Axe: {axe}",
+                f"Bucket: {bucket}",
+                f"Basket: {basket}",
+            )
+            for index, line in enumerate(equipment_lines):
+                self.text(
+                    line,
+                    (layout.equipment.x + 12, layout.equipment.y + 42 + index * 26),
+                    self.small_font,
+                )
+
+        tab_color = (64, 71, 76)
+        selected_tab_color = (116, 111, 83)
+        self.player_info_tab_buttons = [
+            (layout.inventory_tab, InventoryPage.INVENTORY),
+            (layout.quests_tab, InventoryPage.QUESTS),
+            (layout.macros_tab, InventoryPage.MACROS),
+        ]
+        for rect, page in self.player_info_tab_buttons:
+            selected = page is self.inventory_page
+            pygame.draw.rect(
+                self.screen,
+                selected_tab_color if selected else tab_color,
+                rect,
+                border_radius=3,
+            )
+            pygame.draw.rect(self.screen, border_color, rect, 1, border_radius=3)
+            rendered = self.small_font.render(
+                page.value.title(), True, (232, 232, 222)
+            )
+            self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+
+        self.macro_buttons.clear()
+        if self.inventory_page is InventoryPage.MACROS:
+            content_x = layout.inventory.x + 12
+            content_y = layout.inventory.y + 42
+            status = "Recording" if self.macro_recording else "Ready"
+            name = self.memory_file_name or "Unnamed set"
+            self.text(f"Set: {name}", (content_x, content_y), self.small_font)
+            self.text(
+                f"Status: {status}",
+                (content_x, content_y + 24),
+                self.small_font,
+                (235, 205, 120) if self.macro_recording else (172, 176, 182),
+            )
+            actions = ["Stop", "Edit"] if self.macro_recording else ["Start", "Edit"]
+            for index, action in enumerate(actions):
+                rect = pygame.Rect(
+                    content_x, content_y + 58 + index * 38, layout.inventory.width - 24, 32
+                )
+                pygame.draw.rect(self.screen, (174, 169, 145), rect)
+                pygame.draw.rect(self.screen, (35, 35, 35), rect, 2)
+                rendered = self.small_font.render(action, True, (25, 25, 25))
+                self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+                self.macro_buttons.append((rect, action))
+            return
+
+        if self.inventory_page is InventoryPage.QUESTS:
+            active_quests = self.quests.active_quests
+            content_x = layout.inventory.x + 12
+            content_y = layout.inventory.y + 42
+            if not active_quests:
+                self.text("No active quests.", (content_x, content_y), self.small_font)
+            for index, quest in enumerate(active_quests):
+                y = content_y + index * 48
+                if y + 42 >= layout.inventory.bottom:
+                    break
+                self.text(quest.title, (content_x, y), self.small_font)
+                lines = wrap_text(
+                    quest.description,
+                    self.small_font,
+                    layout.inventory.width - 24,
+                )
+                if lines:
+                    self.text(
+                        lines[0],
+                        (content_x, y + 21),
+                        self.small_font,
+                        (172, 176, 182),
+                    )
+            return
+
+        inventory_items = [
+            (name, quantity)
+            for name, quantity in sorted(self.player.inventory.items())
+            if quantity
+        ]
+        carried_food = [
+            obj
+            for obj in self.player.carried_objects
+            if obj.active and "edible" in obj.traits
+        ]
+        inventory_lines = [
+            *(f"{name}: {quantity}" for name, quantity in inventory_items),
+            *(f"{obj.name} (food)" for obj in carried_food),
+        ]
+        if inventory_lines:
+            for index, line in enumerate(inventory_lines):
+                y = layout.inventory.y + 42 + index * 24
+                if y + 20 >= layout.inventory.bottom:
+                    break
+                self.text(line, (layout.inventory.x + 12, y), self.small_font)
+                food_index = index - len(inventory_items)
+                if food_index >= 0:
+                    self.inventory_food_buttons.append(
+                        (
+                            pygame.Rect(
+                                layout.inventory.x + 8,
+                                y - 2,
+                                layout.inventory.width - 16,
+                                22,
+                            ),
+                            carried_food[food_index],
+                        )
+                    )
+        else:
+            self.text(
+                "empty",
+                (layout.inventory.x + 12, layout.inventory.y + 42),
+                self.small_font,
+            )
+
     def draw_ui(self) -> None:
-        sidebar = pygame.Rect(0, 0, SIDEBAR_WIDTH, HEIGHT)
-        right_panel = pygame.Rect(WIDTH - RIGHT_SIDEBAR_WIDTH, 0, RIGHT_SIDEBAR_WIDTH, HEIGHT)
+        sidebar = LEFT_DOCK_RECT
+        right_panel = RIGHT_DOCK_RECT
         pygame.draw.rect(self.screen, (25, 28, 31), sidebar)
         pygame.draw.rect(self.screen, (25, 28, 31), right_panel)
         pygame.draw.rect(self.screen, (92, 95, 101), sidebar, 2)
         pygame.draw.rect(self.screen, (92, 95, 101), right_panel, 2)
-        self.text("Selection View", (12, 16), self.font)
-        self.text("Selected object or tile", (12, 42), self.small_font, (172, 176, 182))
-
-        inventory = ", ".join(f"{k}: {v}" for k, v in sorted(self.player.inventory.items()) if v) or "empty"
-        hoe = (
-            f"{'carried' if self.player.carrying_hoe else 'stored'} (Q{self.player.hoe_quality})"
-            if self.player.has_hoe
-            else "none"
+        self.draw_player_dock()
+        self.draw_selection_details(LEFT_SELECTION_RECT)
+        pygame.draw.rect(self.screen, (92, 95, 101), LEFT_SELECTION_RECT, 2)
+        self.text(
+            "Command Menu",
+            (LEFT_COMMAND_RECT.x + 12, LEFT_COMMAND_RECT.y + 12),
+            self.font,
         )
-        axe = "carried" if self.player.carrying_axe else "stored" if self.player.has_axe else "none"
-        bucket = (
-            f"{self.player.bucket_water_uses}/{self.bucket_capacity} uses"
-            if self.player.has_bucket
-            else "none"
+
+        self.text(
+            "Macros",
+            (LEFT_COMMAND_RECT.x + 12, LEFT_COMMAND_RECT.y + 42),
+            self.small_font,
+            (172, 176, 182),
         )
-        basket = "carried" if self.player.has_basket else "none"
-        carried_food = [
-            obj.name
-            for obj in self.player.carried_objects
-            if obj.active and "edible" in obj.traits
-        ]
-        food = ", ".join(carried_food) if carried_food else "none"
-        stats_height = HEIGHT // 3 + 24
-        inventory_top = 46 + stats_height
-        stats_panel = pygame.Rect(WIDTH - RIGHT_SIDEBAR_WIDTH, 46, RIGHT_SIDEBAR_WIDTH, stats_height)
-        inventory_panel = pygame.Rect(WIDTH - RIGHT_SIDEBAR_WIDTH, inventory_top, RIGHT_SIDEBAR_WIDTH, HEIGHT - inventory_top)
-        pygame.draw.rect(self.screen, (31, 35, 38), stats_panel)
-        pygame.draw.rect(self.screen, (31, 35, 38), inventory_panel)
-        pygame.draw.line(self.screen, (92, 95, 101), (WIDTH - RIGHT_SIDEBAR_WIDTH, inventory_top), (WIDTH, inventory_top), 2)
-
-        self.text("Stats", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 58), self.small_font, (172, 176, 182))
-        self.text(f"Day {self.day.number}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 86), self.small_font)
-        self.text(f"Energy: {self.player.energy}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 110), self.small_font)
-        self.text(f"Hunger: {self.player.hunger}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 134), self.small_font)
-        self.text(f"Speed: {self.player.speed:g}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 158), self.small_font)
-        self.text(f"Hoe: {hoe}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 182), self.small_font)
-        self.text(f"Axe: {axe}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 206), self.small_font)
-        self.text(f"Bucket: {bucket}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 230), self.small_font)
-        self.text(f"Basket: {basket}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 254), self.small_font)
-        self.text(f"Food: {food}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, 278), self.small_font)
-
-        self.text("Inventory", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, inventory_top + 12), self.small_font, (172, 176, 182))
-        if inventory != "empty":
-            for index, item in enumerate(sorted(self.player.inventory.items())):
-                if not item[1]:
-                    continue
-                y = inventory_top + 42 + index * 24
-                self.text(f"{item[0]}: {item[1]}", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, y), self.small_font)
-        else:
-            self.text("empty", (WIDTH - RIGHT_SIDEBAR_WIDTH + 12, inventory_top + 42), self.small_font)
+        self.macro_command_buttons.clear()
+        macro_gap = 6
+        macro_button_width = (
+            LEFT_COMMAND_RECT.width - 24 - macro_gap * 2
+        ) // 3
+        for index, action in enumerate(("Start", "Stop", "Edit")):
+            rect = pygame.Rect(
+                LEFT_COMMAND_RECT.x + 12 + index * (macro_button_width + macro_gap),
+                LEFT_COMMAND_RECT.y + 62,
+                macro_button_width,
+                28,
+            )
+            enabled = (
+                action == "Edit"
+                or (action == "Start" and not self.macro_recording)
+                or (action == "Stop" and self.macro_recording)
+            )
+            pygame.draw.rect(
+                self.screen, (174, 169, 145) if enabled else (75, 78, 78), rect
+            )
+            pygame.draw.rect(self.screen, (35, 35, 35), rect, 1)
+            rendered = self.small_font.render(
+                action, True, (25, 25, 25) if enabled else (145, 145, 138)
+            )
+            self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+            if enabled:
+                self.macro_command_buttons.append((rect, action))
 
         self.action_buttons.clear()
-        show_persistence = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+        action_y = LEFT_COMMAND_RECT.y + 126
         if self.selected_id is not None:
             obj = self.objects[self.selected_id]
             actions = (
@@ -4577,29 +6514,12 @@ class Game:
                 if self.day.mode is Mode.DIRECT
                 else []
             )
-            display_name = object_map_label(obj) if obj.kind is ObjectKind.TREE else obj.name
-            self.text(display_name, (12, 72), self.font)
-            kind_label = obj.kind.name.lower().replace("_", " ").title()
-            self.text(f"{kind_label} | {obj.quality_stage.title()}", (12, 100), self.small_font, (172, 176, 182))
-            description_lines = wrap_text(obj.description, self.small_font, SIDEBAR_WIDTH - 24)
-            description_lines.extend(crop_inspection_lines(obj))
-            if "edible" in obj.traits:
-                description_lines.append(f"Nutrition: {obj.nutrition}")
-            if obj.kind is ObjectKind.CUPBOARD:
-                description_lines.append(
-                    f"Food stored: {len(obj.state.get('food_ids', []))}/"
-                    f"{obj.capacity.get('food', 0)}"
-                )
-            if obj.kind is ObjectKind.BARREL:
-                description_lines.append(
-                    f"Water: {self.barrel_state(obj)['water_uses']}/{self.barrel_capacity} uses"
-                )
-            if show_persistence:
-                description_lines.extend(self.object_persistence_details(obj))
-            for index, line in enumerate(description_lines):
-                self.text(line, (12, 126 + index * 19), self.small_font, (210, 214, 202))
-            action_y = 164 + len(description_lines) * 19
-            self.text("Actions", (12, action_y - 24), self.small_font, (172, 176, 182))
+            self.text(
+                "Selection Actions",
+                (12, LEFT_COMMAND_RECT.y + 100),
+                self.small_font,
+                (172, 176, 182),
+            )
             for index, action in enumerate(actions):
                 workbench_recipe = obj.kind is ObjectKind.WORKBENCH
                 spacing = 48 if workbench_recipe else 38
@@ -4616,47 +6536,28 @@ class Game:
             if not actions:
                 label = "Inspection only during replay" if self.day.mode is Mode.REPLAY else "No available action"
                 self.text(label, (12, action_y), self.small_font, (210, 214, 202))
-        elif self.selected_tile is not None:
-            column, row = self.selected_tile
-            tile = self.map.tile_map.tile_at(column, row)
-            state = self.map.tile_states.get((column, row))
-            crop = self.crop_at_tile(column, row)
-            tile_name = tile.kind.value.replace("_", " ").title() if tile is not None else "Tile"
-            self.text(tile_name, (12, 72), self.font)
-            self.text(f"Tile: {column}, {row}", (12, 100), self.small_font, (172, 176, 182))
-            if crop is not None:
-                self.text(f"Plant: {(crop.variant or crop.name).title()}", (12, 128), self.small_font)
-                self.text(f"Form: {crop.form.title()}", (12, 152), self.small_font)
-                self.text(f"Growth: {float(crop.state.get('growth_progress', 0.0)) * 100:.1f}%", (12, 176), self.small_font)
-                self.text(
-                    f"Water: {float(crop.state.get('water', 0.0)):.1f}%",
-                    (12, 200),
-                    self.small_font,
-                )
-                self.text(
-                    f"Tended: {float(crop.state.get('tended', 0.0)):.1f}%",
-                    (12, 224),
-                    self.small_font,
-                )
-            else:
-                self.text("Plant: none", (12, 128), self.small_font, (210, 214, 202))
-            if show_persistence:
-                start_y = 248 if crop is not None else 152
-                for index, line in enumerate(self.tile_persistence_details(column, row)):
-                    self.text(line, (12, start_y + index * 22), self.small_font, (235, 205, 120))
         else:
-            self.text("Click an object or tile", (12, 72), self.small_font, (210, 214, 202))
-            self.text("in the world to inspect it.", (12, 92), self.small_font, (210, 214, 202))
+            self.text(
+                "Select an object to show its actions.",
+                (12, LEFT_COMMAND_RECT.y + 100),
+                self.small_font,
+                (210, 214, 202),
+            )
+        action_bottom = max(
+            (rect.bottom for rect, _action in self.action_buttons),
+            default=LEFT_COMMAND_RECT.y + 120,
+        )
 
         self.command_buttons.clear()
         menu_title = "Area Commands"
         if self.active_command_category is not None:
             menu_title += f" > {self.active_command_category}"
-        self.text(menu_title, (12, 414), self.small_font, (172, 176, 182))
-        self.text("Quantity", (12, 442), self.small_font, (172, 176, 182))
+        area_menu_y = max(LEFT_COMMAND_RECT.y + 206, action_bottom + 24)
+        self.text(menu_title, (12, area_menu_y), self.small_font, (172, 176, 182))
+        self.text("Quantity", (12, area_menu_y + 28), self.small_font, (172, 176, 182))
         self.area_quantity_buttons.clear()
-        decrease_rect = pygame.Rect(112, 437, 22, 24)
-        increase_rect = pygame.Rect(160, 437, 22, 24)
+        decrease_rect = pygame.Rect(112, area_menu_y + 23, 22, 24)
+        increase_rect = pygame.Rect(160, area_menu_y + 23, 22, 24)
         for rect, label, change in (
             (decrease_rect, "-", -1),
             (increase_rect, "+", 1),
@@ -4669,15 +6570,18 @@ class Game:
         quantity_surface = self.small_font.render(
             str(self.area_command_quantity), True, (225, 225, 214)
         )
-        self.screen.blit(quantity_surface, quantity_surface.get_rect(center=(147, 449)))
+        self.screen.blit(
+            quantity_surface,
+            quantity_surface.get_rect(center=(147, area_menu_y + 35)),
+        )
 
         self.till_time_buttons.clear()
-        command_start_y = 466
+        command_start_y = area_menu_y + 52
         if self.active_command == "Till Grassland":
-            self.text("Till time", (12, 472), self.small_font, (172, 176, 182))
-            decrease_time = pygame.Rect(82, 467, 24, 24)
-            increase_time = pygame.Rect(154, 467, 24, 24)
-            until_done = pygame.Rect(184, 467, 94, 24)
+            self.text("Till time", (12, command_start_y + 6), self.small_font, (172, 176, 182))
+            decrease_time = pygame.Rect(82, command_start_y + 1, 24, 24)
+            increase_time = pygame.Rect(154, command_start_y + 1, 24, 24)
+            until_done = pygame.Rect(184, command_start_y + 1, 94, 24)
             for rect, label, action in (
                 (decrease_time, "-", "decrease"),
                 (increase_time, "+", "increase"),
@@ -4702,8 +6606,8 @@ class Game:
                     else f"{self.till_max_game_minutes / 60:.1f}h"
                 )
             )
-            self.text(budget_label, (112, 472), self.small_font, (225, 225, 214))
-            command_start_y = 496
+            self.text(budget_label, (112, command_start_y + 6), self.small_font, (225, 225, 214))
+            command_start_y += 30
 
         self.command_category_buttons.clear()
         if self.active_command_category is None:
@@ -4727,18 +6631,228 @@ class Game:
             self.text(f"{index + 1}. {command}", (rect.x + 7, rect.y + 6), self.small_font, (25, 25, 25))
             self.command_buttons.append((rect, command))
 
+        self.action_buttons = [
+            (rect, action)
+            for rect, action in self.action_buttons
+            if rect.bottom <= LEFT_MESSAGE_HISTORY_RECT.top
+        ]
+        self.command_buttons = [
+            (rect, command)
+            for rect, command in self.command_buttons
+            if rect.bottom <= LEFT_MESSAGE_HISTORY_RECT.top
+        ]
+        self.command_category_buttons = [
+            (rect, category)
+            for rect, category in self.command_category_buttons
+            if rect.bottom <= LEFT_MESSAGE_HISTORY_RECT.top
+        ]
+
+        self.draw_message_history()
+
         hovered = RELOAD_BUTTON.collidepoint(pygame.mouse.get_pos())
         pygame.draw.rect(self.screen, (205, 198, 166) if hovered else (174, 169, 145), RELOAD_BUTTON)
         pygame.draw.rect(self.screen, (35, 35, 35), RELOAD_BUTTON, 2)
         self.text("Reload Map (F5)", (RELOAD_BUTTON.x + 37, RELOAD_BUTTON.y + 8), self.small_font, (25, 25, 25))
 
-        self.text(self.messages[-1], (SIDEBAR_WIDTH + 14, 690), self.small_font)
+        pygame.draw.rect(self.screen, (34, 40, 45), MESSAGE_BAR)
+        pygame.draw.rect(self.screen, (188, 170, 105), MESSAGE_BAR, 2)
+        previous_clip = self.screen.get_clip()
+        self.screen.set_clip(MESSAGE_BAR.inflate(-8, -2))
+        work_status = self.active_work_progress()
+        if work_status is None:
+            self.text(
+                self.messages[-1],
+                (MESSAGE_BAR.x + 10, MESSAGE_BAR.y + 6),
+                self.small_font,
+            )
+        else:
+            action, progress = work_status
+            label_width = min(330, MESSAGE_BAR.width // 3)
+            self.text(
+                action,
+                (MESSAGE_BAR.x + 10, MESSAGE_BAR.y + 6),
+                self.small_font,
+            )
+            progress_rect = pygame.Rect(
+                MESSAGE_BAR.x + label_width,
+                MESSAGE_BAR.y + 6,
+                MESSAGE_BAR.width - label_width - 58,
+                MESSAGE_BAR.height - 12,
+            )
+            pygame.draw.rect(self.screen, (69, 74, 77), progress_rect)
+            fill_rect = progress_rect.copy()
+            fill_rect.width = round(progress_rect.width * progress)
+            pygame.draw.rect(self.screen, (205, 194, 126), fill_rect)
+            pygame.draw.rect(self.screen, (188, 170, 105), progress_rect, 1)
+            self.text(
+                f"{round(progress * 100)}%",
+                (progress_rect.right + 8, MESSAGE_BAR.y + 6),
+                self.small_font,
+            )
+        self.screen.set_clip(previous_clip)
+
+    def draw_message_history(self, panel: pygame.Rect = LEFT_MESSAGE_HISTORY_RECT) -> None:
+        pygame.draw.rect(self.screen, (31, 35, 38), panel)
+        pygame.draw.rect(self.screen, (92, 95, 101), panel, 2)
+        self.text(
+            "Messages",
+            (panel.x + 12, panel.y + 10),
+            self.small_font,
+            (172, 176, 182),
+        )
+
+        content = pygame.Rect(
+            panel.x + 12,
+            panel.y + 38,
+            panel.width - 32,
+            panel.height - 50,
+        )
+        line_height = self.small_font.get_linesize() + 2
+        visible_line_count = max(1, content.height // line_height)
+        history_lines: list[str] = []
+        for message in self.messages:
+            history_lines.extend(
+                wrap_text(message, self.small_font, content.width)
+            )
+
+        maximum_offset = max(0, len(history_lines) - visible_line_count)
+        self.message_scroll_offset = min(
+            self.message_scroll_offset, maximum_offset
+        )
+        end = len(history_lines) - self.message_scroll_offset
+        start = max(0, end - visible_line_count)
+
+        previous_clip = self.screen.get_clip()
+        self.screen.set_clip(content)
+        for index, line in enumerate(history_lines[start:end]):
+            self.text(
+                line,
+                (content.x, content.y + index * line_height),
+                self.small_font,
+                (220, 222, 214),
+            )
+        self.screen.set_clip(previous_clip)
+
+        if maximum_offset:
+            track = pygame.Rect(panel.right - 12, content.y, 5, content.height)
+            pygame.draw.rect(self.screen, (57, 63, 67), track)
+            thumb_height = max(
+                24,
+                round(
+                    track.height
+                    * visible_line_count
+                    / max(visible_line_count, len(history_lines))
+                ),
+            )
+            scroll_fraction = self.message_scroll_offset / maximum_offset
+            thumb_y = track.bottom - thumb_height - round(
+                (track.height - thumb_height) * scroll_fraction
+            )
+            pygame.draw.rect(
+                self.screen,
+                (174, 169, 145),
+                (track.x, thumb_y, track.width, thumb_height),
+            )
 
     def morning_button_rects(self) -> list[tuple[pygame.Rect, str]]:
-        options = self.morning_options()
-        return [(pygame.Rect(335 + SIDEBAR_WIDTH, 215 + i * 62, 430, 46), label) for i, label in enumerate(options)]
+        return [(rect, action) for rect, action, _ in self.day_plan_buttons if action in {"start", "editor"}]
 
     def draw_morning_menu(self) -> None:
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 155))
+        self.screen.blit(overlay, (0, 0))
+        panel = pygame.Rect(185, 90, WIDTH - 370, HEIGHT - 180)
+        pygame.draw.rect(self.screen, (232, 227, 205), panel)
+        pygame.draw.rect(self.screen, (43, 43, 43), panel, 4)
+        self.text(f"Day Planner — Day {self.day.number}", (panel.x + 28, panel.y + 20), self.title_font, (35, 35, 35))
+        left = pygame.Rect(panel.x + 24, panel.y + 78, 890, panel.height - 112)
+        right = pygame.Rect(left.right + 18, left.y, panel.right - left.right - 42, left.height)
+        for box in (left, right):
+            pygame.draw.rect(self.screen, (218, 213, 190), box)
+            pygame.draw.rect(self.screen, (90, 88, 78), box, 2)
+        self.text("Selected Activities", (left.x + 14, left.y + 12), self.font, (35, 35, 35))
+        self.text("Add to the Day", (right.x + 14, right.y + 12), self.font, (35, 35, 35))
+        self.day_plan_rows.clear()
+        self.day_plan_buttons.clear()
+        cursor_y = left.y + 54
+        for index, activity in enumerate(self.day_plan):
+            nested_height = 36 * len(activity.children) + (34 if activity.kind == "conditional" else 0)
+            row_height = 46 + nested_height
+            y = cursor_y
+            if y + row_height > left.bottom - 12:
+                break
+            row = pygame.Rect(left.x + 12, y, left.width - 24, row_height)
+            pygame.draw.rect(self.screen, (234, 229, 207), row)
+            selected_conditional = activity.kind == "conditional" and index == self.selected_conditional_index
+            pygame.draw.rect(self.screen, (76, 105, 68) if selected_conditional else (110, 106, 92), row, 3 if selected_conditional else 1)
+            detail = " — 11:00 PM" if activity.scheduled_minutes == 23 * 60 else ""
+            self.text(f"{index + 1}. {activity.label}{detail}", (row.x + 12, row.y + 13), self.font, (35, 35, 35))
+            for button_index, (symbol, action) in enumerate((("↑", "up"), ("↓", "down"), ("×", "delete"))):
+                button = pygame.Rect(row.right - 102 + button_index * 32, row.y + 8, 27, 29)
+                pygame.draw.rect(self.screen, (174, 169, 145), button)
+                pygame.draw.rect(self.screen, (55, 55, 50), button, 1)
+                rendered = self.small_font.render(symbol, True, (35, 35, 35))
+                self.screen.blit(rendered, rendered.get_rect(center=button.center))
+                self.day_plan_buttons.append((button, action, index))
+            self.day_plan_rows.append((row, index))
+            if activity.kind == "conditional":
+                select_rect = pygame.Rect(row.x + 6, row.y + 5, row.width - 118, 36)
+                self.day_plan_buttons.append((select_rect, "select_conditional", index))
+                for child_index, child in enumerate(activity.children):
+                    child_y = row.y + 46 + child_index * 36
+                    child_rect = pygame.Rect(row.x + 38, child_y, row.width - 82, 30)
+                    pygame.draw.rect(self.screen, (214, 210, 190), child_rect)
+                    pygame.draw.rect(self.screen, (125, 120, 104), child_rect, 1)
+                    self.text(f"↳ {child.label}", (child_rect.x + 8, child_rect.y + 7), self.small_font, (45, 45, 40))
+                    remove = pygame.Rect(child_rect.right + 7, child_rect.y + 2, 27, 26)
+                    pygame.draw.rect(self.screen, (174, 169, 145), remove)
+                    pygame.draw.rect(self.screen, (55, 55, 50), remove, 1)
+                    rendered = self.small_font.render("×", True, (35, 35, 35))
+                    self.screen.blit(rendered, rendered.get_rect(center=remove.center))
+                    self.day_plan_buttons.append((remove, f"remove_slot:{child_index}", index))
+                add_slot = pygame.Rect(row.x + 38, row.bottom - 30, 150, 24)
+                pygame.draw.rect(self.screen, (174, 169, 145), add_slot)
+                pygame.draw.rect(self.screen, (55, 55, 50), add_slot, 1)
+                self.text("+ Command Slot", (add_slot.x + 9, add_slot.y + 4), self.small_font, (35, 35, 35))
+                self.day_plan_buttons.append((add_slot, "add_slot", index))
+            cursor_y = row.bottom + 8
+        for option_index, (label, kind) in enumerate((("Explore", "explore"), ("Sleep", "sleep"), ("Power Nap", "power_nap"), ("Break", "break"))):
+            column = option_index % 2
+            row_index = option_index // 2
+            rect = pygame.Rect(right.x + 12 + column * ((right.width - 30) // 2 + 6), right.y + 48 + row_index * 34, (right.width - 30) // 2, 28)
+            pygame.draw.rect(self.screen, (184, 179, 154), rect)
+            pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
+            self.text(f"+ {label}", (rect.x + 8, rect.y + 6), self.small_font, (35, 35, 35))
+            self.day_plan_buttons.append((rect, f"add_activity:{kind}", None))
+        self.text("Saved Routines", (right.x + 14, right.y + 119), self.small_font, (70, 70, 65))
+        routines = sorted(self.available_command_sets(), key=lambda item: item[0].lower())
+        for index, (name, _modified) in enumerate(routines):
+            y = right.y + 142 + index * 34
+            if y + 30 > right.bottom - 164:
+                break
+            rect = pygame.Rect(right.x + 12, y, right.width - 24, 30)
+            pygame.draw.rect(self.screen, (174, 169, 145), rect)
+            pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
+            self.text(f"+ {name}", (rect.x + 10, rect.y + 8), self.small_font, (35, 35, 35))
+            self.day_plan_buttons.append((rect, "add_macro", index))
+        if not routines:
+            self.text("No saved routines yet.", (right.x + 16, right.y + 146), self.small_font, (80, 78, 70))
+        conditional = pygame.Rect(right.x + 12, right.bottom - 150, right.width - 24, 36)
+        pygame.draw.rect(self.screen, (174, 169, 145), conditional)
+        pygame.draw.rect(self.screen, (43, 43, 43), conditional, 1)
+        rendered = self.small_font.render("+ Add Conditional", True, (35, 35, 35))
+        self.screen.blit(rendered, rendered.get_rect(center=conditional.center))
+        self.day_plan_buttons.append((conditional, "add_conditional", None))
+        editor = pygame.Rect(right.x + 12, right.bottom - 104, right.width - 24, 38)
+        start = pygame.Rect(right.x + 12, right.bottom - 56, right.width - 24, 42)
+        for rect, label, action, color in ((editor, "Macro Editor", "editor", (174, 169, 145)), (start, "Start Day", "start", (195, 194, 157))):
+            pygame.draw.rect(self.screen, color, rect)
+            pygame.draw.rect(self.screen, (43, 43, 43), rect, 2)
+            rendered = self.font.render(label, True, (35, 35, 35))
+            self.screen.blit(rendered, rendered.get_rect(center=rect.center))
+            self.day_plan_buttons.append((rect, action, None))
+
+    def draw_legacy_morning_menu(self) -> None:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 155))
         self.screen.blit(overlay, (0, 0))
@@ -4758,24 +6872,47 @@ class Game:
         self.text(f"Routine Memory: {routine_count} orders", (420 + SIDEBAR_WIDTH, 625), self.small_font, (35, 35, 35))
 
     def draw_memory_editor(self) -> None:
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 165))
-        self.screen.blit(overlay, (0, 0))
-        panel = pygame.Rect(20, 18, WIDTH - 40, HEIGHT - 36)
+        map_snapshot = self.screen.subsurface(MAP_VIEWPORT).copy()
+        preview_screen = self.camera.world_to_screen(
+            self.command_editor_preview_position()
+        )
+        if self._editor_camera_restore is not None:
+            self.camera.x, self.camera.y = self._editor_camera_restore
+            self._editor_camera_restore = None
+        self.screen.fill((25, 28, 31))
+        scaled_map = pygame.transform.smoothscale(
+            map_snapshot, COMMAND_EDITOR_MAP_RECT.size
+        )
+        self.screen.blit(scaled_map, COMMAND_EDITOR_MAP_RECT.topleft)
+        preview_x = COMMAND_EDITOR_MAP_RECT.x + round(
+            (preview_screen[0] - MAP_VIEWPORT.x)
+            * COMMAND_EDITOR_MAP_RECT.width
+            / MAP_VIEWPORT.width
+        )
+        preview_y = COMMAND_EDITOR_MAP_RECT.y + round(
+            (preview_screen[1] - MAP_VIEWPORT.y)
+            * COMMAND_EDITOR_MAP_RECT.height
+            / MAP_VIEWPORT.height
+        )
+        self.draw_command_editor_preview_avatar((preview_x, preview_y))
+        pygame.draw.rect(self.screen, (188, 170, 105), COMMAND_EDITOR_MAP_RECT, 2)
+        self.draw_message_history(COMMAND_EDITOR_MESSAGES_RECT)
+
+        panel = COMMAND_EDITOR_RECT.inflate(-24, -24)
         pygame.draw.rect(self.screen, (232, 227, 205), panel)
         pygame.draw.rect(self.screen, (43, 43, 43), panel, 4)
-        self.text("Live Memory Editor", (panel.x + 28, panel.y + 18), self.title_font, (35, 35, 35))
+        self.text("Command Set Editor", (panel.x + 28, panel.y + 18), self.title_font, (35, 35, 35))
         self.text(
             "C/Esc closes · Enter saves a field · Values use JSON syntax.",
-            (panel.x + 390, panel.y + 31),
+            (panel.x + 360, panel.y + 31),
             self.small_font,
             (35, 35, 35),
         )
         routine = self.day.remembered_routine
         self.memory_editor_rows.clear()
         self.memory_editor_buttons.clear()
-        self.text("File name", (panel.x + 390, panel.y + 62), self.small_font, (35, 35, 35))
-        self.memory_file_name_rect = pygame.Rect(panel.x + 470, panel.y + 54, 170, 30)
+        self.text("Set name", (panel.x + 24, panel.y + 62), self.small_font, (35, 35, 35))
+        self.memory_file_name_rect = pygame.Rect(panel.x + 96, panel.y + 54, 170, 30)
         editing_name = self.memory_edit_field == "__memory_file_name__"
         pygame.draw.rect(
             self.screen,
@@ -4790,21 +6927,23 @@ class Game:
             self.small_font,
             (35, 35, 35),
         )
-        for index, label in enumerate(["Save", "Load", "Save Homestead"]):
-            width = 130 if label == "Save Homestead" else 72
-            x = (
-                self.memory_file_name_rect.right + 8
-                if index == 0
-                else self.memory_file_name_rect.right + 88
-                if index == 1
-                else self.memory_file_name_rect.right + 168
+        next_button_x = self.memory_file_name_rect.right + 8
+        for label in ["New Set", "Save", "Load", "Run Now", "Record Macro"]:
+            width = (
+                100
+                if label == "Record Macro"
+                else 84
+                if label in {"New Set", "Run Now"}
+                else 72
             )
+            x = next_button_x
             rect = pygame.Rect(x, panel.y + 54, width, 30)
             pygame.draw.rect(self.screen, (174, 169, 145), rect)
             pygame.draw.rect(self.screen, (55, 55, 50), rect, 1)
             rendered = self.small_font.render(label, True, (35, 35, 35))
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
             self.memory_editor_buttons.append((rect, label))
+            next_button_x = rect.right + 8
 
         list_rect = pygame.Rect(panel.x + 24, panel.y + 94, 330, panel.height - 162)
         pygame.draw.rect(self.screen, (218, 213, 190), list_rect)
@@ -4875,6 +7014,95 @@ class Game:
             rendered = self.small_font.render(label, True, (35, 35, 35))
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
             self.memory_editor_buttons.append((rect, label))
+
+        if self.memory_browser_open:
+            self.draw_memory_browser(panel)
+
+    def command_editor_preview_position(self) -> tuple[float, float]:
+        position = (float(self.player.x), float(self.player.y))
+        routine = self.day.remembered_routine
+        if not routine:
+            return position
+        for step in routine[: min(self.memory_edit_index + 1, len(routine))]:
+            candidate: tuple[float, float] | None = None
+            if step.target_point is not None:
+                candidate = step.target_point
+            elif step.target_id is not None and step.target_id in self.objects:
+                candidate = self.objects[step.target_id].center
+            else:
+                bounds = (
+                    step.target_areas[-1]
+                    if step.target_areas
+                    else step.area_bounds
+                )
+                if bounds is not None:
+                    candidate = (
+                        (bounds[0] + bounds[2]) / 2,
+                        (bounds[1] + bounds[3]) / 2,
+                    )
+            if candidate is not None:
+                position = (float(candidate[0]), float(candidate[1]))
+        return position
+
+    def draw_command_editor_preview_avatar(
+        self, position: tuple[int, int]
+    ) -> None:
+        radius = 12
+        pygame.draw.circle(self.screen, (255, 220, 120), position, radius + 2)
+        pygame.draw.circle(self.screen, (222, 214, 187), position, radius)
+        pygame.draw.circle(self.screen, (35, 35, 35), position, radius, 2)
+        pygame.draw.circle(self.screen, (35, 35, 35), (position[0] - 4, position[1] - 3), 2)
+        pygame.draw.circle(self.screen, (35, 35, 35), (position[0] + 4, position[1] - 3), 2)
+
+    def draw_memory_browser(self, editor_panel: pygame.Rect) -> None:
+        dialog = editor_panel.inflate(-24, -150)
+        dialog.top = editor_panel.top + 112
+        pygame.draw.rect(self.screen, (238, 233, 211), dialog)
+        pygame.draw.rect(self.screen, (43, 43, 43), dialog, 4)
+        self.text("Load Command Set", (dialog.x + 18, dialog.y + 14), self.font, (35, 35, 35))
+        self.text(
+            "Click a name to load · click the star to toggle favorite · Esc closes",
+            (dialog.x + 210, dialog.y + 18),
+            self.small_font,
+            (70, 70, 65),
+        )
+
+        entries = self.available_command_sets()
+        by_name = sorted(entries, key=lambda item: item[0].lower())
+        favorites = [item for item in by_name if item[0] in self.memory_favorites]
+        recent = sorted(entries, key=lambda item: item[1], reverse=True)
+        columns = (("Favorites", favorites), ("Recent", recent), ("All", by_name))
+        gap = 12
+        column_width = (dialog.width - 36 - gap * 2) // 3
+        top = dialog.y + 54
+        self.memory_browser_rows.clear()
+        self.memory_favorite_buttons.clear()
+        for column_index, (title, items) in enumerate(columns):
+            x = dialog.x + 12 + column_index * (column_width + gap)
+            column = pygame.Rect(x, top, column_width, dialog.bottom - top - 12)
+            pygame.draw.rect(self.screen, (218, 213, 190), column)
+            pygame.draw.rect(self.screen, (90, 88, 78), column, 1)
+            self.text(title, (x + 10, top + 9), self.small_font, (35, 35, 35))
+            for row_index, (name, modified) in enumerate(items):
+                y = top + 36 + row_index * 30
+                if y + 26 > column.bottom:
+                    break
+                row = pygame.Rect(x + 6, y, column_width - 12, 26)
+                pygame.draw.rect(self.screen, (231, 226, 203), row)
+                pygame.draw.rect(self.screen, (120, 116, 101), row, 1)
+                favorite_rect = pygame.Rect(row.right - 27, row.y + 2, 23, 22)
+                name_rect = pygame.Rect(row.x, row.y, row.width - 30, row.height)
+                label = name
+                if title == "Recent":
+                    label += "  " + datetime.fromtimestamp(modified).strftime("%b %d")
+                while label and self.small_font.size(label)[0] > name_rect.width - 12:
+                    label = label[:-2] + "…"
+                self.text(label, (row.x + 7, row.y + 5), self.small_font, (35, 35, 35))
+                star = "★" if name in self.memory_favorites else "☆"
+                rendered = self.small_font.render(star, True, (115, 88, 25))
+                self.screen.blit(rendered, rendered.get_rect(center=favorite_rect.center))
+                self.memory_browser_rows.append((name_rect, name))
+                self.memory_favorite_buttons.append((favorite_rect, name))
 
     def draw_context_menu(self) -> None:
         if self.context_menu_pos is None:

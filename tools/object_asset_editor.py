@@ -36,6 +36,8 @@ LIBRESPRITE_EXE = Path(
         r"C:\Users\robma\dev\libreArt\libresprite.exe",
     )
 )
+PREVIEW_ZOOM_MIN_PERCENT = 25
+PREVIEW_ZOOM_MAX_PERCENT = 3200
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +52,7 @@ class AssetSlot:
     candidate_assets: tuple[str, ...]
     frame: str
     footprint: tuple[int, int]
+    expected_size_px: tuple[int, int] | None = None
 
     @property
     def label(self) -> str:
@@ -58,6 +61,12 @@ class AssetSlot:
                 "" if self.path is not None and self.path.is_file() else "  [missing sprite]"
             )
             return f"Tile / {self.object_name} ({self.object_id}){asset_status}"
+        if self.category == "boundary":
+            state = f" / {self.state_id}" if self.state_id else ""
+            asset_status = (
+                "" if self.path is not None and self.path.is_file() else "  [missing sprite]"
+            )
+            return f"Boundary / {self.object_name}{state}{asset_status}"
         form = f" / {self.form_id}" if self.form_id else ""
         variant = f" / {self.variant_id}" if self.variant_id else ""
         state = f" / {self.state_id}" if self.state_id else ""
@@ -88,7 +97,10 @@ class AssetSlot:
 
     @property
     def maximum_size_px(self) -> tuple[int, int]:
-        return self.footprint[0] * 64, self.footprint[1] * 64
+        return self.expected_size_px or (
+            self.footprint[0] * 64,
+            self.footprint[1] * 64,
+        )
 
 
 def merge_definition(
@@ -188,6 +200,29 @@ def load_asset_slots(
                 footprint=(1, 1),
             )
         )
+    for boundary_id, boundary_name, states in (
+        ("wall", "Wall", (None,)),
+        ("fence", "Fence", (None,)),
+        ("door", "Door", ("closed", "open")),
+    ):
+        for state_id in states:
+            suffix = "_open" if state_id == "open" else ""
+            asset = f"assets/sprites/boundaries/{boundary_id}{suffix}.png"
+            slots.append(
+                AssetSlot(
+                    category="boundary",
+                    object_id=boundary_id,
+                    object_name=boundary_name,
+                    form_id=None,
+                    variant_id=None,
+                    state_id=state_id,
+                    asset=asset,
+                    candidate_assets=(asset,),
+                    frame="default",
+                    footprint=(1, 1),
+                    expected_size_px=(64, 8),
+                )
+            )
     return slots
 
 
@@ -219,6 +254,14 @@ def scale_image_down(
         return image.copy()
     image.thumbnail(maximum_size, Image.Resampling.LANCZOS)
     return image
+
+
+def prefer_horizontal(source: Image.Image) -> Image.Image:
+    """Rotate portrait artwork clockwise; landscape and square are horizontal."""
+    image = source.convert("RGBA")
+    if image.height > image.width:
+        return image.transpose(Image.Transpose.ROTATE_270)
+    return image.copy()
 
 
 def clipboard_image() -> Image.Image | None:
@@ -519,7 +562,12 @@ def add_render_metadata_fields(
 
 
 def replace_png_from_image(
-    path: Path, source: Image.Image, maximum_size: tuple[int, int]
+    path: Path,
+    source: Image.Image,
+    maximum_size: tuple[int, int],
+    *,
+    exact_canvas: bool = False,
+    prefer_horizontal_orientation: bool = False,
 ) -> None:
     old_size = source.size
     chunks = {
@@ -531,18 +579,36 @@ def replace_png_from_image(
         with Image.open(path) as existing:
             old_size = existing.size
         chunks = png_text_chunks(path)
-    replacement = scale_image_down(source, maximum_size)
+    oriented_source = (
+        prefer_horizontal(source) if prefer_horizontal_orientation else source
+    )
+    replacement = (
+        fit_clipboard_image(oriented_source, maximum_size)
+        if exact_canvas
+        else scale_image_down(oriented_source, maximum_size)
+    )
     chunks = scaled_text_chunks(chunks, old_size, replacement.size)
     save_png_with_text(path, replacement, chunks)
 
 
 def scale_png_to_correct_size(
-    path: Path, maximum_size: tuple[int, int]
+    path: Path,
+    maximum_size: tuple[int, int],
+    *,
+    exact_canvas: bool = False,
+    prefer_horizontal_orientation: bool = False,
 ) -> bool:
     with Image.open(path) as existing:
         source = existing.copy()
         old_size = existing.size
-    replacement = scale_image_down(source, maximum_size)
+    oriented_source = (
+        prefer_horizontal(source) if prefer_horizontal_orientation else source
+    )
+    replacement = (
+        fit_clipboard_image(oriented_source, maximum_size)
+        if exact_canvas
+        else scale_image_down(oriented_source, maximum_size)
+    )
     if replacement.size == old_size:
         return False
     chunks = scaled_text_chunks(
@@ -664,7 +730,7 @@ class ObjectAssetEditor:
         self.tk = tk
         self.ttk = ttk
         self.root = tk.Tk()
-        self.root.title("Remembering Object Asset Editor")
+        self.root.title("Remembering Sprite Asset Editor")
         self.root.geometry("1400x760")
         self.slots = load_asset_slots()
         self.preview_photo: ImageTk.PhotoImage | None = None
@@ -679,7 +745,7 @@ class ObjectAssetEditor:
 
         left = ttk.Frame(outer)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        ttk.Label(left, text="Object / Form / Tile").pack(anchor="w")
+        ttk.Label(left, text="Object / Form / Tile / Boundary").pack(anchor="w")
         self.listbox = tk.Listbox(left, width=42, exportselection=False)
         scrollbar = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=scrollbar.set)
@@ -758,8 +824,8 @@ class ObjectAssetEditor:
         self.zoom_label = tk.StringVar(value="100%")
         ttk.Scale(
             zoom_controls,
-            from_=25,
-            to=800,
+            from_=PREVIEW_ZOOM_MIN_PERCENT,
+            to=PREVIEW_ZOOM_MAX_PERCENT,
             variable=self.preview_zoom,
             command=self.preview_zoom_changed,
         ).pack(side="left", fill="x", expand=True, padx=6)
@@ -836,7 +902,7 @@ class ObjectAssetEditor:
         self.rotate_button.pack(side="left", padx=(8, 0))
         self.increase_button = ttk.Button(
             controls,
-            text="Increase Image to Tile Size",
+            text="Increase Image to Expected Size",
             command=self.increase_to_tile_size,
             state="disabled",
         )
@@ -888,7 +954,7 @@ class ObjectAssetEditor:
         ttk.Button(controls, text="Refresh", command=self.refresh).pack(
             side="left", padx=8
         )
-        self.status = ttk.Label(controls, text="Choose an object or form.")
+        self.status = ttk.Label(controls, text="Choose a sprite asset.")
         self.status.pack(side="left", padx=8)
 
         palette = ttk.Frame(right)
@@ -949,10 +1015,14 @@ class ObjectAssetEditor:
         self.undo_stack.clear()
         self.asset_dirty = False
         self.heading.configure(text=slot.label)
+        size_prefix = (
+            "Canonical boundary canvas"
+            if slot.category == "boundary"
+            else f"Footprint: {slot.footprint[0]}×{slot.footprint[1]} tiles  ·  Expected canvas"
+        )
         self.expected_size.configure(
             text=(
-                f"Footprint: {slot.footprint[0]}×{slot.footprint[1]} tiles  ·  "
-                f"Expected canvas: {slot.maximum_size_px[0]}×"
+                f"{size_prefix}: {slot.maximum_size_px[0]}×"
                 f"{slot.maximum_size_px[1]} px"
             )
         )
@@ -1323,7 +1393,13 @@ class ObjectAssetEditor:
             )
             return
         try:
-            replace_png_from_image(path, source, slot.maximum_size_px)
+            replace_png_from_image(
+                path,
+                source,
+                slot.maximum_size_px,
+                exact_canvas=slot.category == "boundary",
+                prefer_horizontal_orientation=slot.category == "boundary",
+            )
         except Exception as exc:
             messagebox.showerror("Replacement failed", str(exc))
             return
@@ -1390,7 +1466,12 @@ class ObjectAssetEditor:
         if slot is None or path is None or not path.is_file():
             return
         try:
-            changed = scale_png_to_correct_size(path, slot.maximum_size_px)
+            changed = scale_png_to_correct_size(
+                path,
+                slot.maximum_size_px,
+                exact_canvas=slot.category == "boundary",
+                prefer_horizontal_orientation=slot.category == "boundary",
+            )
         except Exception as exc:
             messagebox.showerror("Scaling failed", str(exc))
             return

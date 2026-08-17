@@ -12,6 +12,16 @@
       "spawn_chances": {}
     },
     "grassland": {
+      // Draw grassland_overlay-tilled.png over the base tile. Its source
+      // per-pixel alpha is multiplied by till_percentage / 100.
+      "sprite_overlays": [
+        {
+          "id": "tilled",
+          "state_field": "till_percentage",
+          "value_range": [0, 100],
+          "alpha_range": [0, 255]
+        }
+      ],
       "spawn_chances": {
         "pebble": 0.05,
         "wild_plant": 0.04,

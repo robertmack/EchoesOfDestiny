@@ -8,6 +8,7 @@ import pytest
 from PIL import Image, PngImagePlugin
 
 from tools.object_asset_editor import (
+    PREVIEW_ZOOM_MAX_PERCENT,
     add_render_metadata_fields,
     clipboard_dib_bytes,
     clipboard_png_bytes,
@@ -21,6 +22,10 @@ from tools.object_asset_editor import (
     save_render_metadata_text,
     scale_png_to_correct_size,
 )
+
+
+def test_sprite_editor_supports_pixel_scale_zoom() -> None:
+    assert PREVIEW_ZOOM_MAX_PERCENT == 3200
 
 
 def test_add_all_known_render_metadata_fields() -> None:
@@ -121,6 +126,17 @@ def test_asset_inventory_contains_objects_and_forms() -> None:
     )
     assert grassland.asset == "assets/sprites/tiles/grassland.png"
     assert grassland.maximum_size_px == (64, 64)
+    boundary_slots = [slot for slot in slots if slot.category == "boundary"]
+    assert {
+        (slot.object_id, slot.state_id, slot.asset, slot.maximum_size_px)
+        for slot in boundary_slots
+    } == {
+        ("wall", None, "assets/sprites/boundaries/wall.png", (64, 8)),
+        ("fence", None, "assets/sprites/boundaries/fence.png", (64, 8)),
+        ("door", "closed", "assets/sprites/boundaries/door.png", (64, 8)),
+        ("door", "open", "assets/sprites/boundaries/door_open.png", (64, 8)),
+    }
+    assert all(slot.label.startswith("Boundary / ") for slot in boundary_slots)
 
 
 def test_clipboard_image_shrinks_without_upscaling_and_preserves_alpha() -> None:
@@ -175,6 +191,56 @@ def test_replacement_creates_a_missing_conventional_asset(tmp_path: Path) -> Non
         assert created.size == (32, 16)
         assert created.mode == "RGBA"
         assert created.getpixel((16, 8))[3] == 128
+
+
+def test_boundary_replacement_uses_exact_transparent_canvas(tmp_path: Path) -> None:
+    path = tmp_path / "wall.png"
+    source = Image.new("RGBA", (32, 8), (80, 60, 40, 255))
+
+    replace_png_from_image(
+        path,
+        source,
+        (64, 8),
+        exact_canvas=True,
+        prefer_horizontal_orientation=True,
+    )
+
+    with Image.open(path) as result:
+        assert result.size == (64, 8)
+        assert result.getbbox() == (16, 0, 48, 8)
+
+
+def test_boundary_replacement_rotates_portrait_clipboard_art(tmp_path: Path) -> None:
+    path = tmp_path / "wall.png"
+    source = Image.new("RGBA", (8, 32), (80, 60, 40, 255))
+
+    replace_png_from_image(
+        path,
+        source,
+        (64, 8),
+        exact_canvas=True,
+        prefer_horizontal_orientation=True,
+    )
+
+    with Image.open(path) as result:
+        assert result.size == (64, 8)
+        assert result.getbbox() == (16, 0, 48, 8)
+
+
+def test_boundary_correct_size_pads_existing_short_image(tmp_path: Path) -> None:
+    path = tmp_path / "fence.png"
+    Image.new("RGBA", (8, 2), (80, 60, 40, 255)).save(path)
+
+    assert scale_png_to_correct_size(
+        path,
+        (64, 8),
+        exact_canvas=True,
+        prefer_horizontal_orientation=True,
+    ) is True
+
+    with Image.open(path) as result:
+        assert result.size == (64, 8)
+        assert result.getbbox() == (28, 3, 36, 5)
 
 
 def test_correct_scale_updates_canvas_and_explicit_frame_rectangles(

@@ -2,268 +2,202 @@
   "level_map": "homestead.jsonc",
   "remembered_routine": [
     {
-      "action": "Gather Pebbles",
-      "area_bounds": [
-        57.0,
-        72.0,
-        82.0,
-        88.0
-      ],
-      "quantity": 7,
-      "target_areas": [
-        [
-          57.0,
-          72.0,
-          82.0,
-          88.0
+      "action": "Harvest Berries",
+      "target_id": 2011939,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          66,
+          73
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Gather Branches",
-      "area_bounds": [
-        54.0,
-        72.0,
-        81.0,
-        88.0
-      ],
-      "quantity": 7,
-      "target_areas": [
-        [
-          54.0,
-          72.0,
-          81.0,
-          88.0
+      "action": "Harvest Berries",
+      "target_id": 2012266,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          59,
+          83
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Gather Tall Grass",
-      "area_bounds": [
-        56.0,
-        72.0,
-        82.0,
-        90.0
-      ],
-      "quantity": 7,
-      "target_areas": [
-        [
-          56.0,
-          72.0,
-          82.0,
-          90.0
+      "action": "Harvest Berries",
+      "target_id": 2012268,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          67,
+          83
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Craft Crude Hoe",
-      "target_id": 4,
-      "target_type": "workbench",
-      "target_point": [
-        55.0,
-        66.0
-      ]
-    },
-    {
-      "action": "Craft Crude Axe",
-      "target_id": 4,
-      "target_type": "workbench",
-      "target_point": [
-        55.0,
-        66.0
-      ]
-    },
-    {
-      "action": "Weave Fiber Basket",
-      "target_id": 4,
-      "target_type": "workbench",
-      "target_point": [
-        55.0,
-        66.0
-      ]
-    },
-    {
-      "action": "Chop Trees",
-      "area_bounds": [
-        24.0,
-        80.0,
-        46.0,
-        93.0
-      ],
-      "quantity": 7,
-      "target_areas": [
-        [
-          24.0,
-          80.0,
-          46.0,
-          93.0
+      "action": "Harvest Berries",
+      "target_id": 2012269,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          69,
+          83
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Craft Wooden Bucket",
-      "target_id": 4,
-      "target_type": "workbench",
-      "target_point": [
-        55.0,
-        66.0
-      ]
-    },
-    {
-      "action": "Till Grassland",
-      "area_bounds": [
-        72.0,
-        81.0,
-        74.0,
-        83.0
-      ],
-      "target_areas": [
-        [
-          70.0,
-          80.0,
-          74.0,
-          84.0
+      "action": "Harvest Berries",
+      "target_id": 2012390,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          82,
+          86
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ],
-      "max_game_minutes": 120
+      }
     },
     {
-      "action": "Gather Tall Grass",
-      "area_bounds": [
-        59.0,
-        73.0,
-        85.0,
-        94.0
-      ],
-      "quantity": 7,
-      "target_areas": [
-        [
-          59.0,
-          73.0,
-          85.0,
-          94.0
+      "action": "Harvest Berries",
+      "target_id": 2012391,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          83,
+          86
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Build Barrel",
-      "area_bounds": [
-        78.0,
-        81.0,
-        79.0,
-        82.0
-      ],
-      "quantity": 1,
-      "target_areas": [
-        [
-          78.0,
-          81.0,
-          79.0,
-          82.0
+      "action": "Harvest Berries",
+      "target_id": 2012466,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          86,
+          88
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Gather Seeds",
-      "area_bounds": [
-        58.0,
-        72.0,
-        84.0,
-        90.0
-      ],
-      "quantity": 16,
-      "target_areas": [
-        [
-          58.0,
-          72.0,
-          84.0,
-          90.0
+      "action": "Harvest Berries",
+      "target_id": 2012535,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          85,
+          90
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Plant Wheat",
-      "area_bounds": [
-        70.0,
-        80.0,
-        74.0,
-        84.0
-      ],
-      "quantity": 16,
-      "target_areas": [
-        [
-          70.0,
-          80.0,
-          74.0,
-          84.0
+      "action": "Harvest Berries",
+      "target_id": 2012536,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          86,
+          90
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Tend Crops",
-      "area_bounds": [
-        70.0,
-        80.0,
-        74.0,
-        84.0
-      ],
-      "quantity": 16,
-      "target_areas": [
-        [
-          72.0,
-          81.0,
-          74.0,
-          83.0
+      "action": "Harvest Berries",
+      "target_id": 2012560,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          86,
+          91
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Water Crops",
-      "area_bounds": [
-        70.0,
-        80.0,
-        74.0,
-        84.0
-      ],
-      "quantity": 16,
-      "secondary_bounds": [
-        87.0,
-        88.0,
-        88.0,
-        89.0
-      ],
-      "source_areas": [
-        [
-          87.0,
-          88.0,
-          88.0,
-          89.0
+      "action": "Harvest Berries",
+      "target_id": 2012609,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          88,
+          92
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ]
+      }
     },
     {
-      "action": "Fill Barrel",
-      "target_id": 2013363,
-      "target_type": "barrel",
-      "area_bounds": [
-        87.0,
-        88.0,
-        88.0,
-        89.0
-      ],
-      "target_point": [
-        78.5,
-        81.5
-      ],
-      "source_areas": [
-        [
-          87.0,
-          88.0,
-          88.0,
-          89.0
+      "action": "Harvest Berries",
+      "target_id": 2012312,
+      "target_type": "bush",
+      "target_point": {
+        "tilexy": [
+          89,
+          84
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
         ]
-      ],
-      "target_build_memory": "barrel:78:81"
+      }
+    },
+    {
+      "action": "Gather",
+      "target_id": 2012349,
+      "target_type": "branch",
+      "target_point": {
+        "tilexy": [
+          89,
+          85
+        ],
+        "subtilexy": [
+          32.0,
+          32.0
+        ]
+      }
+    },
+    {
+      "action": "Move To"
     }
   ],
   "build_memories": [
@@ -290,28 +224,86 @@
       }
     },
     {
+      "id": "barrel:74:78",
+      "object_type": "barrel",
+      "x": 74,
+      "y": 78,
+      "orientation": "E/W",
+      "quality": 20,
+      "build_count": 0,
+      "persistent": false,
+      "persistence_modifier": 1.1069097504279868,
+      "state": {
+        "water_uses": 0,
+        "build_count": 1,
+        "built_today": false,
+        "build_memory_id": "barrel:74:78",
+        "persistence_modifier": 1.1069097504279868,
+        "water_memory": {
+          "observed": 0,
+          "count": 0,
+          "remembered": 0,
+          "persistence_modifier": null
+        },
+        "sprite_state": "empty"
+      }
+    },
+    {
       "id": "barrel:78:81",
       "object_type": "barrel",
       "x": 78,
       "y": 81,
       "orientation": "E/W",
       "quality": 20,
-      "build_count": 67,
+      "build_count": 68,
       "persistent": true,
       "persistence_modifier": 0.900126391646507,
       "state": {
         "water_uses": 0,
-        "build_count": 67,
+        "build_count": 68,
         "built_today": false,
         "build_memory_id": "barrel:78:81",
         "persistence_modifier": 0.900126391646507,
         "water_memory": {
-          "observed": 30,
-          "count": 5,
+          "observed": 0,
+          "count": 0,
           "remembered": 0,
-          "persistence_modifier": 0.8103054765063372
+          "persistence_modifier": null
         },
         "sprite_state": "empty"
+      }
+    }
+  ],
+  "controlled_character_id": 1,
+  "characters": [
+    {
+      "id": 1,
+      "type": "human",
+      "name": "The Forgotten",
+      "last_sleep_id": 1,
+      "conditions": {
+        "trauma": 90,
+        "hunger": 95,
+        "thirst": 95
+      },
+      "condition_memory": {
+        "trauma": 90,
+        "hunger": 95,
+        "thirst": 95
+      },
+      "skills": {
+        "farming": {
+          "level": 0,
+          "experience": 0
+        },
+        "crafting": {
+          "level": 0,
+          "experience": 0
+        },
+        "harvesting": {
+          "level": 0,
+          "experience": 0
+        }
       }
     }
   ],
@@ -322,8 +314,8 @@
       "persistent_state": {
         "persistent": true,
         "x": 61,
-        "y": 66,
-        "orientation": "E/W",
+        "y": 64,
+        "orientation": "E",
         "quality": 18,
         "active": true,
         "state": {},
@@ -334,8 +326,8 @@
       },
       "current_state": {
         "x": 61,
-        "y": 66,
-        "orientation": "E/W",
+        "y": 64,
+        "orientation": "E",
         "quality": 18,
         "active": true,
         "state": {},
@@ -352,7 +344,7 @@
         "persistent": true,
         "x": 69,
         "y": 65,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 16,
         "active": true,
         "state": {},
@@ -364,7 +356,7 @@
       "current_state": {
         "x": 69,
         "y": 65,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 16,
         "active": true,
         "state": {},
@@ -379,9 +371,9 @@
       "type": "food_prep_station",
       "persistent_state": {
         "persistent": true,
-        "x": 62,
-        "y": 70,
-        "orientation": "E/W",
+        "x": 63,
+        "y": 71,
+        "orientation": "W",
         "quality": 34,
         "active": true,
         "state": {},
@@ -391,9 +383,9 @@
         "container": null
       },
       "current_state": {
-        "x": 62,
-        "y": 70,
-        "orientation": "E/W",
+        "x": 63,
+        "y": 71,
+        "orientation": "W",
         "quality": 34,
         "active": true,
         "state": {},
@@ -408,9 +400,9 @@
       "type": "workbench",
       "persistent_state": {
         "persistent": true,
-        "x": 53,
-        "y": 65,
-        "orientation": "E/W",
+        "x": 52,
+        "y": 63,
+        "orientation": "E",
         "quality": 19,
         "active": true,
         "state": {},
@@ -420,9 +412,9 @@
         "container": null
       },
       "current_state": {
-        "x": 53,
-        "y": 65,
-        "orientation": "E/W",
+        "x": 52,
+        "y": 63,
+        "orientation": "E",
         "quality": 19,
         "active": true,
         "state": {},
@@ -438,8 +430,8 @@
       "persistent_state": {
         "persistent": true,
         "x": 57,
-        "y": 65,
-        "orientation": "E/W",
+        "y": 63,
+        "orientation": "E",
         "quality": 38,
         "active": true,
         "state": {},
@@ -450,67 +442,9 @@
       },
       "current_state": {
         "x": 57,
-        "y": 65,
-        "orientation": "E/W",
+        "y": 63,
+        "orientation": "E",
         "quality": 38,
-        "active": true,
-        "state": {},
-        "variant": null,
-        "form": "",
-        "flavor": null,
-        "container": null
-      }
-    },
-    {
-      "id": 6,
-      "type": "branch",
-      "persistent_state": {
-        "persistent": true,
-        "x": 70,
-        "y": 66,
-        "orientation": "E/W",
-        "quality": 82,
-        "active": true,
-        "state": {},
-        "variant": null,
-        "form": "",
-        "flavor": null,
-        "container": null
-      },
-      "current_state": {
-        "x": 70,
-        "y": 66,
-        "orientation": "E/W",
-        "quality": 82,
-        "active": true,
-        "state": {},
-        "variant": null,
-        "form": "",
-        "flavor": null,
-        "container": null
-      }
-    },
-    {
-      "id": 7,
-      "type": "pebble",
-      "persistent_state": {
-        "persistent": true,
-        "x": 71,
-        "y": 68,
-        "orientation": "E/W",
-        "quality": 91,
-        "active": true,
-        "state": {},
-        "variant": null,
-        "form": "",
-        "flavor": null,
-        "container": null
-      },
-      "current_state": {
-        "x": 71,
-        "y": 68,
-        "orientation": "E/W",
-        "quality": 91,
         "active": true,
         "state": {},
         "variant": null,
@@ -526,7 +460,7 @@
         "persistent": true,
         "x": 82,
         "y": 66,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 76,
         "active": true,
         "state": {},
@@ -538,40 +472,11 @@
       "current_state": {
         "x": 82,
         "y": 66,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 76,
         "active": true,
         "state": {},
         "variant": null,
-        "form": "",
-        "flavor": null,
-        "container": null
-      }
-    },
-    {
-      "id": 9,
-      "type": "wild_plant",
-      "persistent_state": {
-        "persistent": true,
-        "x": 68,
-        "y": 70,
-        "orientation": "E/W",
-        "quality": 68,
-        "active": true,
-        "state": {},
-        "variant": "wheat",
-        "form": "",
-        "flavor": null,
-        "container": null
-      },
-      "current_state": {
-        "x": 68,
-        "y": 70,
-        "orientation": "E/W",
-        "quality": 68,
-        "active": true,
-        "state": {},
-        "variant": "wheat",
         "form": "",
         "flavor": null,
         "container": null
@@ -584,7 +489,7 @@
         "persistent": true,
         "x": 45,
         "y": 48,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 94,
         "active": true,
         "state": {},
@@ -596,7 +501,7 @@
       "current_state": {
         "x": 45,
         "y": 48,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 94,
         "active": true,
         "state": {},
@@ -613,7 +518,7 @@
         "persistent": true,
         "x": 82,
         "y": 45,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 87,
         "active": true,
         "state": {},
@@ -625,7 +530,7 @@
       "current_state": {
         "x": 82,
         "y": 45,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 87,
         "active": true,
         "state": {},
@@ -642,7 +547,7 @@
         "persistent": true,
         "x": 47,
         "y": 82,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 91,
         "active": true,
         "state": {},
@@ -654,7 +559,7 @@
       "current_state": {
         "x": 47,
         "y": 82,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 91,
         "active": true,
         "state": {},
@@ -671,7 +576,7 @@
         "persistent": true,
         "x": 83,
         "y": 82,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 83,
         "active": true,
         "state": {},
@@ -683,7 +588,7 @@
       "current_state": {
         "x": 83,
         "y": 82,
-        "orientation": "E/W",
+        "orientation": "E",
         "quality": 83,
         "active": true,
         "state": {},

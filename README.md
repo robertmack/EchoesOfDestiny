@@ -26,14 +26,43 @@ A gray-box Python/Pygame version of the first-day prototype. The project deliber
 - Day 1 begins automatically in Direct Control; later mornings offer Direct Control, replay-and-sleep, replay-and-expand, replay-and-explore, and memory-adjustment choices
 - The clock advances one game minute per real second during play, pauses at the morning choice, and resets to 6:00 AM after sleep
 - Time multipliers scale the whole simulation, including walking and job timers; work consumes the same game time at every speed
-- Pause/Play is independent of the selected time multiplier. The simulation pauses automatically when no movement or work is queued, and issuing a command returns it to Play without changing its multiplier
+- The timeline shows `Day X` and the clock together. Pause/Play is independent
+  of the selected time multiplier. A single rate box is flanked by minus and
+  plus controls; the keyboard `-` and `+` keys select the adjacent rate.
+  **1 Cmd** runs one complete queued or remembered command—including its
+  movement and batch work—and then pauses before another begins. The simulation
+  also pauses automatically when no movement or work is queued.
 - Sleeping fades the map to black, restores the level's dawn persistent state at full black, then fades the next-day map in before showing the morning choice
 
 ## Editing the map
 
+### Characters and survival conditions
+
+`data/character_types.jsonc` defines reusable character templates. A level
+authors character instances in its `characters` array and selects the active
+one with `controlled_character_id`. Each instance references the object where
+it last slept through `last_sleep_id`; that object supplies dawn fatigue and
+the adjacent spawn location. Mutable character state is copied into
+`current_level.jsonc` for the active run and is rebuilt from the authored level
+on the next application launch.
+
+Live conditions are Trauma, Hunger, Thirst, and Fatigue on a 0–99 burden scale,
+where zero is best. They derive Movement Speed, Task Speed, and a signed
+Healing Rate. Hunger, Thirst, and Fatigue values from 20 through 80 are neutral;
+healthy boundary values heal Trauma while critical values worsen it. Natural water
+can be drunk directly, with a bucket making the action more effective, while a
+barrel provides portable remembered water. Foods declare signed
+`condition_recovery` values; positive values recover a condition and negative
+values impose a penalty.
+
+The bed offers one 45-minute Power Nap in each of the 1–5 PM and 5–9 PM
+windows. A nap removes Fatigue equal to the bed's current quality. Normal sleep
+updates the character's last-sleep reference and begins the nightly condition
+memory transition.
+
 `data/homestead.jsonc` is the fixed-level authoring definition for the Homestead scenario. It contains terrain, structures, generation rules, and the scenario's authored object instances. Runtime play never writes to it, but it remains editable while refining the level. New fixed levels will use separate level files. Shared object definitions remain in `data/object_types.jsonc`.
 
-`data/current_level.jsonc` is the mutable active-session file. Every application launch rebuilds it from `homestead.jsonc`, so state from an earlier run is discarded. During the session it contains live object instances plus sparse state for modified tiles and remains active across in-game days. Each object instance has a unique numeric ID and two state records: `persistent_state` and `current_state`. Both contain position, orientation, quality, active status, and type-specific state. `E/W` uses the catalog footprint horizontally; `N/S` swaps width and height so a two-tile object spans vertically.
+`data/current_level.jsonc` is the mutable active-session file. Every application launch rebuilds it from `homestead.jsonc`, so state from an earlier run is discarded. During the session it contains live object instances plus sparse state for modified tiles and remains active across in-game days. Each object instance has a unique numeric ID and two state records: `persistent_state` and `current_state`. Both contain position, orientation, quality, active status, and type-specific state. Orientations are `N`, `E`, `S`, and `W`; north/south swap a rectangular catalog footprint's width and height. Legacy `E/W` and `N/S` values remain loadable as east and north.
 
 ### Object sprite metadata
 
@@ -80,6 +109,16 @@ py -m remembering.render_metadata src\assets\sprites\objects\tree.png
 Press F6 while the game is running to clear cached PNG pixels and metadata and reload
 edited sprites on the next frame.
 
+### Scenario editor
+
+Launch the map editor from the project root (an optional scenario path may follow the script name):
+
+```powershell
+.venv\Scripts\python.exe tools\scenario_editor.py data\homestead.jsonc
+```
+
+The editor displays terrain, rooms, and the authored `objects` array. Double-click a palette entry (or use **Add at view center**) to create an object. Drag objects to move them on the tile grid, press **R** to rotate clockwise through `E`, `S`, `W`, and `N`, and press **Delete** to remove the selection. The mouse wheel zooms and middle-drag pans. Save validates IDs, types, quality, orientation, footprints, and map bounds, then replaces only the `objects` array so unrelated JSONC comments and scenario fields remain intact. Undo and redo are available from the toolbar or with Ctrl+Z/Ctrl+Y.
+
 ### Object definition editor
 
 Launch the object-definition editor from the project root:
@@ -118,7 +157,7 @@ After saving in an external editor, **Reload Image from File** rereads the PNG a
 embedded metadata from disk. Any unsaved staged edits in the asset tool are discarded.
 The **Sprite pixels** width and height fields show the current PNG canvas and can
 resize it to exact dimensions; explicit frame rectangles are updated with the image.
-The scrollable preview has a 25%-800% zoom bar and uses nearest-neighbor scaling so
+The scrollable preview has a 25%-3200% zoom bar and uses nearest-neighbor scaling so
 individual sprite pixels remain crisp while inspecting them.
 Metadata shortcut buttons add Rotation, Random Placement, Centered Anchor, or Frames
 to the editable JSON. **Add All** inserts rotation, random placement, and a default
@@ -135,6 +174,20 @@ stroke. Ctrl-C copies the selected sprite image and Ctrl-V replaces it from the
 clipboard.
 Tile assets use `src/assets/sprites/tiles/<tile-type>.png` and have an expected
 64×64-pixel canvas.
+
+Boundary assets appear in the same editor with a canonical horizontal 64×8-pixel
+canvas. Their paths are `src/assets/sprites/boundaries/wall.png`, `fence.png`,
+`door.png` (closed), and `door_open.png`. The horizontal asset is the canonical
+authoring orientation; vertical boundary rendering can rotate it, so no duplicate
+vertical editor slots are needed. Clipboard images wider than they are tall remain
+horizontal; portrait images are rotated clockwise; square images are treated as
+horizontal. The result is centered on an exact transparent 64×8 canvas.
+
+The canonical door sprite has its hinge at the left (west) end and its leaf extends
+right (east). An open door reuses this sprite and rotates it 90 degrees
+counterclockwise around that hinge. On a north boundary it swings onto the west edge
+of the tile above; on a west boundary it swings onto the north edge of the tile to
+the right.
 
 Replacement uses the selected form's `footprint × 64` as its maximum size.
 Oversized clipboard images shrink proportionally; smaller images remain at native
@@ -154,11 +207,53 @@ Press F6 in the running game to see either change.
 Missing conventional assets remain visible as `[missing sprite]`; rename or create the
 expected file before using replacement.
 
+Objects and tiles can also declare state-driven transparent overlays:
+
+```json
+"sprite_overlays": [{
+  "id": "apples",
+  "state_field": "apple_count",
+  "value_range": [0, 8],
+  "alpha_range": [0, 255]
+}]
+```
+
+An object overlay is named `<resolved-sprite-stem>_overlay-<id>.png`, with fallback
+through the same flavor/state/variant/form chain as the base sprite. For example,
+`tree_overlay-apples.png` appears progressively as `apple_count` approaches 8.
+A tile overlay is named `<tile-type>_overlay-<id>.png`; the grassland example uses
+`grassland_overlay-tilled.png` and `till_percentage`. Overlay PNGs retain their own
+per-pixel transparency, which is multiplied by the computed state alpha. A boolean
+or other nonnumeric field switches an overlay off/on. Numeric fields use
+`value_range`, or may replace its upper bound with an object's quality-adjusted
+capacity by declaring `capacity_resource`, as the barrel water example does.
+
+Tile base sprites are loaded from `src/assets/sprites/tiles/<tile-type>.png` when
+present, with the catalog display color remaining as the fallback. F6 reloads base
+and overlay tile images along with object sprites.
+
 Pressing F5 first reads `homestead.jsonc`. Every authored object ID is added to or updated in `current_level.jsonc`, replacing both its persistent and current state so placement changes are immediately visible. Current-level-only instances whose IDs are absent from Homestead are preserved. The game then reloads the synchronized current level.
 
 Quality is mutable instance data from 1 to 100: 1–20 is ruined, 21–40 damaged, 41–60 worn, 61–79 good, and 80–100 fine. Every object type provides one description for each quality stage, and Object View automatically displays the description matching the selected instance. The `instance_fields` section at the top of `data/object_types.jsonc` documents every supported instance field.
 
 `data/tile_types.jsonc` controls random morning population by tile type. Grassland currently has a 5% pebble chance, 4% wild-plant chance (currently the wheat variant), 10% tall-grass chance, and 2% berry-bush chance per available tile. Hills increase pebble chance to 12%. Tile and object types can add local `spawn_influence` entries containing `type`, `chance`, `distance`, and `decay`. The first affected tile receives the full boost; each farther tile multiplies it by `decay`, so `1.0` remains constant while `0.5` halves the boost per tile. A day-based seed creates a different layout each morning while an F5 reload during the same day recreates the same layout. Daily-spawned items are omitted from the nightly state file because the next morning replaces them.
+
+Harvest Berries is also available as a nearest-first, quantity-limited Gather area
+command. Harvesting takes 3 seconds without a basket and 0.5 seconds with one, then
+clears the bush's `has_berries` state without removing the bush.
+
+For Gather and Farm area commands, clicking the character instead of dragging a
+rectangle chooses the nearest eligible targets across the map, up to the current
+quantity. Remembered routines retain this as a nearest-to-character instruction and
+rescan from the character's current position on replay. Construction placement and
+water-source authorization still require explicit map selections.
+
+Harvesting berries or mature wheat awards one Harvesting XP. Every 10 cumulative XP
+grants a Harvesting level, and each level increases harvesting work speed by 5%.
+The Stats tab lists every character skill on its own row with level and XP progress.
+The fruit cannot be harvested twice, but the remaining bush can still be pulled for
+fiber and a branch. Its berries use the state-overlay slot
+`bush_berry_overlay-berries.png`.
 
 The Area Commands panel is a numbered hierarchical menu. Its top level lists Gather, Farm, and Build; click an entry or press its number to open that submenu. The breadcrumb heading shows the current menu, commands are numbered for both mouse and keyboard selection, and Back is always the final entry. Gather contains Pebbles, Branches, Seeds, Tall Grass, and—while carrying an axe—Chop Trees. Farm contains tilling, planting, watering, tending, and harvesting commands as they become available. Tilling currently uses a fixed 15 game minutes per action; skill, equipment, and quality modifiers will be added later. The till-area controls allow a time budget in one-hour increments or Until Done. Each till action adds `5.0% × affinity`, and grassland becomes soil at 100%. At night, soil rolls against its remembered-soil percentage; a failed roll returns it to grassland with 80–100% till progress. Crops are object entities contained spatially by soil tiles and begin in the seed form.
 
@@ -189,6 +284,25 @@ Rooms have a `quality` of `ruined`, `damaged`, `normal`, `fine`, or `great`. The
 ```
 
 Valid sides are `top`, `bottom`, `left`, and `right`. Connected rooms must contain matching reciprocal door entries. A door without `connects_to` is an exterior entrance. Rooms with `"blocks_movement": true` have solid walls everywhere except these openings.
+
+Standalone walls, fences, and doors use the optional top-level `boundaries` array. A
+boundary occupies the edge between tiles rather than either tile's area:
+
+```json
+"boundaries": [
+  {"id": "garden_fence_1", "type": "fence", "x": 20, "y": 18, "edge": "east"},
+  {"id": "garden_gate", "type": "door", "x": 20, "y": 19, "edge": "east", "open": false}
+]
+```
+
+Types are `wall`, `fence`, and `door`; edges may be `north`, `east`, `south`, or
+`west`. The loader normalizes east and south to the neighboring tile's west and
+north edge, so a shared edge has exactly one address and duplicate occupancy is an
+error. Walls and fences block crossing. An unlocked door (`"locked": false`, the
+default) is passable to route planning even while visually closed; the character
+pauses and opens it before crossing. A locked door blocks route planning. Right-click
+a nearby door to open or close it. Rendering derives corner junctions from the meeting edges;
+corners are not separately authored objects.
 
 The `buildings` list contains only identity and name metadata—buildings have no rectangle or collision geometry. Every room references a `building_id`. The house groups the bedroom, kitchen, and common room; the physically separate workshop room belongs to its own workshop building. Room geometry alone determines floors, walls, doors, and building placement.
 
@@ -274,7 +388,7 @@ You can also open **Run and Debug** in VS Code and choose **Run Remembering Prot
 5. Click the damaged food prep station and cook wheat.
 6. Click the broken table and eat.
 7. Click the broken bed and sleep.
-8. On Day 2, choose one of the replay outcomes: **Replay Memory and Sleep**, **Replay Memory and Expand Routine**, or **Replay Memory and Explore**. Press **C** to open the paused live memory editor. It can edit, reorder, duplicate, add, and remove commands, and save or load named `.memory` files from `data/memories`. **Save Homestead** writes `homestead.memory` with one click. The secret **A** shortcut loads that file and automatically selects Replay Memory and Sleep until Escape is pressed.
+8. On Day 2, choose one of the replay outcomes: **Replay Memory and Sleep**, **Replay Memory and Expand Routine**, or **Replay Memory and Explore**. Press **C** during play to open the paused Command Set Editor. It can edit, reorder, duplicate, add, and remove commands; save or load named `.jsonc` command sets from `data/memories`; and launch the open set immediately with **Run Now**. **Save Homestead** writes `homestead.jsonc` with one click. The secret **A** shortcut loads that file and automatically selects Replay Memory and Sleep until Escape is pressed.
 
 ## Architecture
 

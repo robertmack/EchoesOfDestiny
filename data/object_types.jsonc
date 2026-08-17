@@ -33,9 +33,11 @@
 //
 //     "descriptions": {},                 // optional condition/form descriptions
 //     "state_fields": [],                 // optional per-instance state names
+//     "state_defaults": {},               // optional initial values for missing state
+//     "sprite_overlays": [],              // optional state-driven transparent layers
 //     "states": [],                       // optional named sprite/operating states
 //     "capacity": {},                     // optional resource/container capacity
-//     "nutrition": 0,                     // optional; hunger restored when edible
+//     "condition_recovery": {},           // optional signed condition recovery
 //     "default_variant": "variant_id",    // optional
 //     "variants": [],                     // optional
 //     "forms": {},                        // optional persistent transformations
@@ -142,6 +144,11 @@
                     {
                         "id": "sleep",
                         "label": "Sleep"
+                    },
+                    {
+                        "id": "power_nap",
+                        "label": "Power Nap",
+                        "duration_seconds": 45
                     }
                 ]
             }
@@ -511,6 +518,12 @@
                 "edible"
             ],
             "nutrition": 30,
+            "condition_recovery": {
+                "trauma": 0,
+                "hunger": 30,
+                "thirst": 5,
+                "fatigue": 0
+            },
             "descriptions": {
                 "ruined": "A miserable bowl of watery porridge, but it is edible.",
                 "damaged": "A thin, lumpy porridge with little appeal.",
@@ -527,6 +540,12 @@
                 "edible"
             ],
             "nutrition": 8,
+            "condition_recovery": {
+                "trauma": 0,
+                "hunger": 8,
+                "thirst": 3,
+                "fatigue": 0
+            },
             "descriptions": {
                 "ruined": "Crushed and spoiled berries.",
                 "damaged": "Bruised berries that are still barely edible.",
@@ -836,6 +855,21 @@
             "variants": [
                 "berry"
             ],
+            // Missing has_berries defaults to true for existing/authored bushes.
+            // bush_berry_overlay-berries.png can hold the fruit pixels while
+            // bush_berry.png remains the harvested, fruitless base bush.
+            "state_fields": [
+                "has_berries"
+            ],
+            "state_defaults": {
+                "has_berries": true
+            },
+            "sprite_overlays": [
+                {
+                    "id": "berries",
+                    "state_field": "has_berries"
+                }
+            ],
             "descriptions": {
                 "ruined": "A dead thorny bush with no fruit.",
                 "damaged": "A struggling bush bearing a few shriveled berries.",
@@ -856,8 +890,9 @@
                         ],
                         "duration_seconds": {
                             "base": 3.0,
-                            "with_basket": 1.0
+                            "with_basket": 0.5
                         },
+                        "availability": "bush_has_berries",
                         "creates": {
                             "type": "berry",
                             "quantity": 1,
@@ -891,6 +926,20 @@
             // selected when that value reaches zero.
             "state_fields": [
                 "water_uses"
+            ],
+            // Draw barrel_overlay-water.png over the resolved base barrel.
+            // capacity_resource uses this instance's quality-adjusted capacity
+            // as the top of the value range.
+            "sprite_overlays": [
+                {
+                    "id": "water",
+                    "state_field": "water_uses",
+                    "capacity_resource": "water",
+                    "alpha_range": [
+                        0,
+                        255
+                    ]
+                }
             ],
             "states": [
                 "full",
@@ -948,6 +997,13 @@
                         "id": "pour_water_into_barrel",
                         "label": "Pour Water Into Barrel",
                         "availability": "barrel_can_receive_bucket"
+                    }
+                ],
+                "use": [
+                    {
+                        "id": "drink_from_barrel",
+                        "label": "Drink from Barrel",
+                        "availability": "barrel_has_water"
                     }
                 ]
             }

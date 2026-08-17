@@ -605,7 +605,7 @@
                 {
                     "side": "right",
                     "offset": 2,
-                    "width": 2,
+                    "width": 1,
                     "connects_to": "common_room"
                 }
             ]
@@ -630,7 +630,7 @@
                 {
                     "side": "right",
                     "offset": 2,
-                    "width": 2,
+                    "width": 1,
                     "connects_to": "common_room"
                 }
             ]
@@ -655,19 +655,19 @@
                 {
                     "side": "left",
                     "offset": 2,
-                    "width": 2,
+                    "width": 1,
                     "connects_to": "bedroom"
                 },
                 {
                     "side": "left",
                     "offset": 7,
-                    "width": 2,
+                    "width": 1,
                     "connects_to": "kitchen_room"
                 },
                 {
                     "side": "bottom",
                     "offset": 2,
-                    "width": 2
+                    "width": 1
                 }
             ]
         },
@@ -691,9 +691,121 @@
                 {
                     "side": "bottom",
                     "offset": 3,
-                    "width": 2
+                    "width": 1
                 }
             ]
+        }
+    ],
+    "boundaries": [
+        {"id": "wall_001", "type": "wall", "x": 52, "y": 63, "edge": "north"},
+        {"id": "wall_002", "type": "wall", "x": 52, "y": 63, "edge": "west"},
+        {"id": "wall_003", "type": "wall", "x": 52, "y": 64, "edge": "west"},
+        {"id": "wall_004", "type": "wall", "x": 52, "y": 65, "edge": "west"},
+        {"id": "wall_005", "type": "wall", "x": 52, "y": 66, "edge": "west"},
+        {"id": "wall_006", "type": "wall", "x": 52, "y": 67, "edge": "west"},
+        {"id": "wall_007", "type": "wall", "x": 52, "y": 68, "edge": "west"},
+        {"id": "wall_008", "type": "wall", "x": 52, "y": 69, "edge": "north"},
+        {"id": "wall_009", "type": "wall", "x": 53, "y": 63, "edge": "north"},
+        {"id": "wall_010", "type": "wall", "x": 53, "y": 69, "edge": "north"},
+        {"id": "wall_011", "type": "wall", "x": 54, "y": 63, "edge": "north"},
+        {"id": "wall_012", "type": "wall", "x": 54, "y": 69, "edge": "north"},
+        {"id": "wall_013", "type": "wall", "x": 55, "y": 63, "edge": "north"},
+        {"id": "wall_014", "type": "wall", "x": 56, "y": 63, "edge": "north"},
+        {"id": "wall_015", "type": "wall", "x": 57, "y": 63, "edge": "north"},
+        {"id": "wall_016", "type": "wall", "x": 57, "y": 69, "edge": "north"},
+        {"id": "wall_017", "type": "wall", "x": 58, "y": 63, "edge": "north"},
+        {"id": "wall_018", "type": "wall", "x": 58, "y": 69, "edge": "north"},
+        {"id": "wall_019", "type": "wall", "x": 59, "y": 63, "edge": "west"},
+        {"id": "wall_020", "type": "wall", "x": 59, "y": 64, "edge": "west"},
+        {"id": "wall_021", "type": "wall", "x": 59, "y": 65, "edge": "west"},
+        {"id": "wall_022", "type": "wall", "x": 59, "y": 66, "edge": "west"},
+        {"id": "wall_023", "type": "wall", "x": 59, "y": 67, "edge": "west"},
+        {"id": "wall_024", "type": "wall", "x": 59, "y": 68, "edge": "west"},
+        {"id": "wall_025", "type": "wall", "x": 61, "y": 62, "edge": "north"},
+        {"id": "wall_026", "type": "wall", "x": 61, "y": 62, "edge": "west"},
+        {"id": "wall_027", "type": "wall", "x": 61, "y": 63, "edge": "west"},
+        {"id": "wall_028", "type": "wall", "x": 61, "y": 64, "edge": "west"},
+        {"id": "wall_029", "type": "wall", "x": 61, "y": 65, "edge": "west"},
+        {"id": "wall_030", "type": "wall", "x": 61, "y": 66, "edge": "west"},
+        {"id": "wall_031", "type": "wall", "x": 61, "y": 67, "edge": "north"},
+        {"id": "wall_032", "type": "wall", "x": 61, "y": 67, "edge": "west"},
+        {"id": "wall_033", "type": "wall", "x": 61, "y": 68, "edge": "west"},
+        {"id": "wall_034", "type": "wall", "x": 61, "y": 69, "edge": "west"},
+        {"id": "wall_035", "type": "wall", "x": 61, "y": 70, "edge": "west"},
+        {"id": "wall_036", "type": "wall", "x": 61, "y": 71, "edge": "west"},
+        {"id": "wall_037", "type": "wall", "x": 61, "y": 72, "edge": "north"},
+        {"id": "wall_038", "type": "wall", "x": 62, "y": 62, "edge": "north"},
+        {"id": "wall_039", "type": "wall", "x": 62, "y": 67, "edge": "north"},
+        {"id": "wall_040", "type": "wall", "x": 62, "y": 72, "edge": "north"},
+        {"id": "wall_041", "type": "wall", "x": 63, "y": 62, "edge": "north"},
+        {"id": "wall_042", "type": "wall", "x": 63, "y": 67, "edge": "north"},
+        {"id": "wall_043", "type": "wall", "x": 63, "y": 72, "edge": "north"},
+        {"id": "wall_044", "type": "wall", "x": 64, "y": 62, "edge": "north"},
+        {"id": "wall_045", "type": "wall", "x": 64, "y": 67, "edge": "north"},
+        {"id": "wall_046", "type": "wall", "x": 64, "y": 72, "edge": "north"},
+        {"id": "wall_047", "type": "wall", "x": 65, "y": 62, "edge": "north"},
+        {"id": "wall_048", "type": "wall", "x": 65, "y": 67, "edge": "north"},
+        {"id": "wall_049", "type": "wall", "x": 65, "y": 72, "edge": "north"},
+        {"id": "wall_050", "type": "wall", "x": 66, "y": 62, "edge": "north"},
+        {"id": "wall_051", "type": "wall", "x": 66, "y": 67, "edge": "north"},
+        {"id": "wall_052", "type": "wall", "x": 66, "y": 72, "edge": "north"},
+        {"id": "wall_053", "type": "wall", "x": 67, "y": 62, "edge": "north"},
+        {"id": "wall_054", "type": "wall", "x": 67, "y": 62, "edge": "west"},
+        {"id": "wall_055", "type": "wall", "x": 67, "y": 63, "edge": "west"},
+        {"id": "wall_056", "type": "wall", "x": 67, "y": 66, "edge": "west"},
+        {"id": "wall_057", "type": "wall", "x": 67, "y": 67, "edge": "west"},
+        {"id": "wall_058", "type": "wall", "x": 67, "y": 68, "edge": "west"},
+        {"id": "wall_059", "type": "wall", "x": 67, "y": 71, "edge": "west"},
+        {"id": "wall_060", "type": "wall", "x": 67, "y": 72, "edge": "north"},
+        {"id": "wall_061", "type": "wall", "x": 68, "y": 62, "edge": "north"},
+        {"id": "wall_062", "type": "wall", "x": 68, "y": 72, "edge": "north"},
+        {"id": "wall_063", "type": "wall", "x": 69, "y": 62, "edge": "north"},
+        {"id": "wall_064", "type": "wall", "x": 70, "y": 62, "edge": "north"},
+        {"id": "wall_065", "type": "wall", "x": 71, "y": 62, "edge": "north"},
+        {"id": "wall_066", "type": "wall", "x": 71, "y": 72, "edge": "north"},
+        {"id": "wall_067", "type": "wall", "x": 72, "y": 62, "edge": "north"},
+        {"id": "wall_068", "type": "wall", "x": 72, "y": 72, "edge": "north"},
+        {"id": "wall_069", "type": "wall", "x": 73, "y": 62, "edge": "west"},
+        {"id": "wall_070", "type": "wall", "x": 73, "y": 63, "edge": "west"},
+        {"id": "wall_071", "type": "wall", "x": 73, "y": 64, "edge": "west"},
+        {"id": "wall_072", "type": "wall", "x": 73, "y": 65, "edge": "west"},
+        {"id": "wall_073", "type": "wall", "x": 73, "y": 66, "edge": "west"},
+        {"id": "wall_074", "type": "wall", "x": 73, "y": 67, "edge": "west"},
+        {"id": "wall_075", "type": "wall", "x": 73, "y": 68, "edge": "west"},
+        {"id": "wall_076", "type": "wall", "x": 73, "y": 69, "edge": "west"},
+        {"id": "wall_077", "type": "wall", "x": 73, "y": 70, "edge": "west"},
+        {"id": "wall_078", "type": "wall", "x": 73, "y": 71, "edge": "west"},
+        {"id": "wall_079", "type": "wall", "x": 67, "y": 65, "edge": "west"},
+        {"id": "wall_080", "type": "wall", "x": 67, "y": 70, "edge": "west"},
+        {"id": "wall_081", "type": "wall", "x": 70, "y": 72, "edge": "north"},
+        {"id": "wall_082", "type": "wall", "x": 56, "y": 69, "edge": "north"},
+        {"id": "bedroom_door_1", "type": "door", "x": 67, "y": 64, "edge": "west"},
+        {"id": "kitchen_door_1", "type": "door", "x": 67, "y": 69, "edge": "west"},
+        {"id": "front_door_1", "type": "door", "x": 69, "y": 72, "edge": "north"},
+        {"id": "workshop_door_1", "type": "door", "x": 55, "y": 69, "edge": "north"}
+    ],
+    "controlled_character_id": 1,
+    "characters": [
+        {
+            "id": 1,
+            "type": "human",
+            "name": "The Forgotten",
+            "last_sleep_id": 1,
+            "conditions": {
+                "trauma": 90,
+                "hunger": 95,
+                "thirst": 95
+            },
+            "condition_memory": {
+                "trauma": 90,
+                "hunger": 95,
+                "thirst": 95
+            },
+            "skills": {
+                "farming": {"level": 0, "experience": 0},
+                "crafting": {"level": 0, "experience": 0},
+                "harvesting": {"level": 0, "experience": 0}
+            }
         }
     ],
     "objects": [
@@ -701,8 +813,8 @@
             "id": 1,
             "type": "bed",
             "x": 61,
-            "y": 66,
-            "orientation": "E/W",
+            "y": 64,
+            "orientation": "E",
             "quality": 18
         },
         {
@@ -716,16 +828,16 @@
         {
             "id": 3,
             "type": "food_prep_station",
-            "x": 62,
-            "y": 70,
-            "orientation": "E/W",
+            "x": 63,
+            "y": 71,
+            "orientation": "W",
             "quality": 34
         },
         {
             "id": 4,
             "type": "workbench",
-            "x": 53,
-            "y": 65,
+            "x": 52,
+            "y": 63,
             "orientation": "E/W",
             "quality": 19
         },
@@ -733,25 +845,9 @@
             "id": 5,
             "type": "tool_storage",
             "x": 57,
-            "y": 65,
+            "y": 63,
             "orientation": "E/W",
             "quality": 38
-        },
-        {
-            "id": 6,
-            "type": "branch",
-            "x": 70,
-            "y": 66,
-            "orientation": "E/W",
-            "quality": 82
-        },
-        {
-            "id": 7,
-            "type": "pebble",
-            "x": 71,
-            "y": 68,
-            "orientation": "E/W",
-            "quality": 91
         },
         {
             "id": 8,
@@ -760,15 +856,6 @@
             "y": 66,
             "orientation": "E/W",
             "quality": 76
-        },
-        {
-            "id": 9,
-            "type": "wild_plant",
-            "variant": "wheat",
-            "x": 68,
-            "y": 70,
-            "orientation": "E/W",
-            "quality": 68
         },
         {
             "id": 10,

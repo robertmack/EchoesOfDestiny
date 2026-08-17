@@ -1,0 +1,144 @@
+{
+  "_schema_version": 1,
+
+  "groups": [
+    {
+      "id": "learning_to_farm",
+      "title": "Learning to Farm",
+      "description": "Turn wild ground into a meal made by your own hands.",
+      "sequential": true,
+      "quests": [
+        "acquire_a_hoe",
+        "prepare_the_field",
+        "plant_wheat",
+        "harvest_wheat",
+        "prepare_food",
+        "eat_homemade_food",
+      ],
+    },
+    {
+      // Non-sequential groups can branch. The three follow-up quests share an
+      // explicit prerequisite and therefore become active together.
+      "id": "survival_foundations",
+      "title": "Survival Foundations",
+      "description": "Make it through the day, then build a safer daily life.",
+      "sequential": false,
+      "quests": [
+        "survive_the_day",
+        "improve_sleep_quality",
+        "secure_food",
+        "restore_health",
+      ],
+    },
+  ],
+
+  "quests": [
+    {
+      "id": "acquire_a_hoe",
+      "group": "learning_to_farm",
+      "title": "A Tool for the Earth",
+      "description": "Acquire a hoe so you can begin working the soil.",
+      "trigger": { "always": true },
+      "completion": { "player": { "has_hoe": true } },
+      "rewards": [],
+    },
+    {
+      // This is a one-off special objective: progress counts distinct grassland
+      // tiles at the moment each one is fully converted into soil.
+      "id": "prepare_the_field",
+      "group": "learning_to_farm",
+      "title": "Sixteen Patches of Earth",
+      "description": "Fully till 16 tiles of grassland into soil.",
+      "trigger": { "always": true },
+      "completion": { "event": { "soil_tiles_tilled": 16 } },
+      "rewards": [],
+    },
+    {
+      "id": "plant_wheat",
+      "group": "learning_to_farm",
+      "title": "Seeds in the Furrows",
+      "description": "Plant wheat in at least 3 prepared tiles.",
+      "trigger": { "always": true },
+      "completion": { "event": { "wheat_planted": 3 } },
+      "rewards": [],
+    },
+    {
+      "id": "harvest_wheat",
+      "group": "learning_to_farm",
+      "title": "Bring In the Wheat",
+      "description": "Harvest at least 3 grain from your wheat.",
+      "trigger": { "always": true },
+      "completion": { "event": { "wheat_harvested": 3 } },
+      "rewards": [],
+    },
+    {
+      "id": "prepare_food",
+      "group": "learning_to_farm",
+      "title": "From Grain to Supper",
+      "description": "Use your harvest to prepare a bowl of porridge.",
+      "trigger": { "always": true },
+      "completion": { "event": { "homemade_food_prepared": 1 } },
+      "rewards": [],
+    },
+    {
+      "id": "eat_homemade_food",
+      "group": "learning_to_farm",
+      "title": "A Meal of Your Own",
+      "description": "Sit at the table and eat the porridge you made.",
+      "trigger": { "always": true },
+      "completion": { "event": { "homemade_food_eaten": 1 } },
+      "rewards": [
+        { "achievement": "From Soil to Supper" },
+      ],
+    },
+    {
+      "id": "survive_the_day",
+      "group": "survival_foundations",
+      "title": "Survive the Day",
+      "description": "Make it safely through an entire day and reach the next morning.",
+      "trigger": { "always": true },
+      "completion": { "event": { "days_survived": 1 } },
+      "rewards": [
+        { "achievement": "Survivor" },
+      ],
+    },
+    {
+      "id": "improve_sleep_quality",
+      "group": "survival_foundations",
+      "title": "A Better Night's Sleep",
+      "description": "Improve the quality of your sleeping arrangements.",
+      "prerequisites": ["survive_the_day"],
+      "trigger": { "always": true },
+      // Fatigue is a harmful condition: lower is better. This checks the dawn
+      // snapshot after sleeping, rather than a transient daytime value.
+      "completion": {
+        "start_day_condition": { "fatigue": { "at_most": 60 } },
+      },
+      "rewards": [],
+    },
+    {
+      "id": "secure_food",
+      "group": "survival_foundations",
+      "title": "Food for Tomorrow",
+      "description": "Eat two meals during a single day.",
+      "prerequisites": ["survive_the_day"],
+      "trigger": { "always": true },
+      "completion": { "event_today": { "food_eaten": 2 } },
+      "rewards": [],
+    },
+    {
+      "id": "restore_health",
+      "group": "survival_foundations",
+      "title": "Restore Your Strength",
+      "description": "Go to bed with trauma reduced to 60 or less.",
+      "prerequisites": ["survive_the_day"],
+      "trigger": { "always": true },
+      "completion": {
+        "bedtime_condition": { "trauma": { "at_most": 60 } },
+      },
+      "rewards": [
+        { "achievement": "On the Mend" },
+      ],
+    },
+  ],
+}

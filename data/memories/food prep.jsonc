@@ -1,0 +1,201 @@
+{
+    "_schema_version": 1,
+    "name": "food prep",
+    "commands": [
+        {
+            "action": "Harvest Berries",
+            "target_id": 2011939,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    66,
+                    73
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012266,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    59,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012268,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    67,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012269,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    69,
+                    83
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012390,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    82,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012391,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    83,
+                    86
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012466,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    88
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012535,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    85,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012536,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    90
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012560,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    86,
+                    91
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012609,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    88,
+                    92
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Harvest Berries",
+            "target_id": 2012312,
+            "target_type": "bush",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    84
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        },
+        {
+            "action": "Gather",
+            "target_id": 2012349,
+            "target_type": "branch",
+            "target_point": {
+                "tilexy": [
+                    89,
+                    85
+                ],
+                "subtilexy": [
+                    32.0,
+                    32.0
+                ]
+            }
+        }
+    ]
+}

@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from remembering.model import (
+    BoundaryObject,
     BuildMemory,
+    CharacterState,
+    CharacterType,
     MapBuilding,
     MapDefinition,
     MapDoor,
@@ -21,6 +24,8 @@ from remembering.model import (
     PersistencePolicy,
     RoomQuality,
     RoutineStep,
+    SkillState,
+    SpriteOverlay,
     WorldObject,
 )
 from remembering.coordinates import (
@@ -37,6 +42,7 @@ DEFAULT_MAP_PATH = Path(__file__).resolve().parents[2] / "data" / "homestead.jso
 DEFAULT_CURRENT_LEVEL_PATH = Path(__file__).resolve().parents[2] / "data" / "current_level.jsonc"
 DEFAULT_OBJECT_TYPES_PATH = Path(__file__).resolve().parents[2] / "data" / "object_types.jsonc"
 DEFAULT_TILE_TYPES_PATH = Path(__file__).resolve().parents[2] / "data" / "tile_types.jsonc"
+DEFAULT_CHARACTER_TYPES_PATH = Path(__file__).resolve().parents[2] / "data" / "character_types.jsonc"
 DEFAULT_MEMORY_DIR = Path(__file__).resolve().parents[2] / "data" / "memories"
 
 
@@ -46,6 +52,226 @@ class MapLoadError(ValueError):
 
 class ObjectPersistenceError(ValueError):
     """Raised when persistent object state cannot be read or written safely."""
+
+
+def _load_behavior(type_id: str, value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise MapLoadError(f"Character type {type_id!r} behavior must be an object")
+    behavior = dict(value)
+    for section in (
+        "priorities",
+        "diet",
+        "senses",
+        "sleep",
+        "reproduction",
+        "attacks",
+        "abilities",
+    ):
+        if not isinstance(behavior.get(section), dict):
+            raise MapLoadError(
+                f"Character type {type_id!r} behavior {section!r} must be an object"
+            )
+    if not isinstance(behavior.get("predator"), bool):
+        raise MapLoadError(
+            f"Character type {type_id!r} behavior predator must be boolean"
+        )
+    senses = behavior["senses"]
+    for field in ("hearing_distance", "smell_distance", "vision_distance"):
+        if not isinstance(senses.get(field), (int, float)) or senses[field] < 0:
+            raise MapLoadError(
+                f"Character type {type_id!r} has invalid {field}"
+            )
+    reproduction = behavior["reproduction"]
+    if not isinstance(reproduction.get("enabled"), bool):
+        raise MapLoadError(
+            f"Character type {type_id!r} reproduction enabled must be boolean"
+        )
+    return behavior
+
+
+def load_character_types(
+    path: Path = DEFAULT_CHARACTER_TYPES_PATH,
+) -> dict[str, CharacterType]:
+    try:
+        catalog = loads_jsonc(path.read_text(encoding="utf-8"))
+        defaults = dict(catalog.get("_defaults", {}))
+        entries = {
+            str(_required(entry, "id", "character type")): dict(entry)
+            for entry in catalog.get("character_types", [])
+        }
+        if len(entries) != len(catalog.get("character_types", [])):
+            raise MapLoadError("Character catalog contains duplicate type IDs")
+
+        resolved_data: dict[str, dict[str, Any]] = {}
+
+        def resolve(type_id: str, resolving: tuple[str, ...] = ()) -> dict[str, Any]:
+            if type_id in resolved_data:
+                return resolved_data[type_id]
+            if type_id in resolving:
+                cycle = " -> ".join((*resolving, type_id))
+                raise MapLoadError(f"Character type inheritance cycle: {cycle}")
+            entry = entries.get(type_id)
+            if entry is None:
+                raise MapLoadError(f"Unknown inherited character type {type_id!r}")
+            parent_id = (
+                str(entry["inherits"]) if entry.get("inherits") is not None else None
+            )
+            base = (
+                resolve(parent_id, (*resolving, type_id))
+                if parent_id is not None
+                else defaults
+            )
+            resolved_data[type_id] = _merge_definition(base, entry)
+            return resolved_data[type_id]
+
+        definitions: dict[str, CharacterType] = {}
+        for type_id in entries:
+            entry = resolve(type_id)
+            description = str(
+                _required(entry, "description", f"character type {type_id!r}")
+            )
+            if not description.strip():
+                raise MapLoadError(
+                    f"Character type {type_id!r} description cannot be empty"
+                )
+            definitions[type_id] = CharacterType(
+                type_id=type_id,
+                name=str(entry.get("name", type_id.title())),
+                description=description,
+                inherits=(
+                    str(entry["inherits"])
+                    if entry.get("inherits") is not None
+                    else None
+                ),
+                conditions={
+                    str(stat_id): dict(config)
+                    for stat_id, config in entry.get("conditions", {}).items()
+                },
+                secondary_stats={
+                    str(stat_id): dict(config)
+                    for stat_id, config in entry.get("secondary_stats", {}).items()
+                },
+                skills={
+                    str(skill_id): dict(config)
+                    for skill_id, config in entry.get("skills", {}).items()
+                },
+                behavior=_load_behavior(type_id, entry.get("behavior", {})),
+            )
+        return definitions
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, MapLoadError):
+            raise
+        raise MapLoadError(f"Could not load character catalog {path}: {exc}") from exc
+
+
+def _load_characters(
+    map_data: dict[str, Any],
+    objects: list[WorldObject],
+    persistence_path: Path | None,
+    character_types_path: Path,
+) -> tuple[dict[int, CharacterState], int | None, dict[str, CharacterType]]:
+    definitions = load_character_types(character_types_path)
+    entries = map_data.get("characters", [])
+    controlled_id = (
+        int(map_data["controlled_character_id"])
+        if map_data.get("controlled_character_id") is not None
+        else None
+    )
+    if persistence_path is not None and persistence_path.exists():
+        persisted = loads_jsonc(persistence_path.read_text(encoding="utf-8"))
+        entries = persisted.get("characters") or entries
+        if persisted.get("characters") and persisted.get("controlled_character_id") is not None:
+            controlled_id = int(persisted["controlled_character_id"])
+    object_by_id = {obj.object_id: obj for obj in objects}
+    characters: dict[int, CharacterState] = {}
+    for entry in entries:
+        type_id = str(_required(entry, "type", "character instance"))
+        definition = definitions.get(type_id)
+        if definition is None:
+            raise MapLoadError(f"Unknown character type {type_id!r}")
+        character_id = int(_required(entry, "id", "character instance"))
+        sleep_id = int(_required(entry, "last_sleep_id", "character instance"))
+        sleep_object = object_by_id.get(sleep_id)
+        if sleep_object is None or "Sleep" not in sleep_object.interactions:
+            raise MapLoadError(
+                f"Character {character_id} references invalid sleep object {sleep_id}"
+            )
+        conditions = {
+            str(key): float(value)
+            for key, value in entry.get("conditions", {}).items()
+        }
+        missing_conditions = (
+            set(definition.conditions) - {"fatigue"} - set(conditions)
+        )
+        if missing_conditions:
+            raise MapLoadError(
+                f"Character {character_id} is missing starting conditions "
+                f"{sorted(missing_conditions)!r}"
+            )
+        memory = {
+            str(key): float(value)
+            for key, value in entry.get("condition_memory", {}).items()
+        }
+        remembered_conditions = set(definition.conditions) - {"fatigue"}
+        missing_memory = remembered_conditions - set(memory)
+        if missing_memory:
+            raise MapLoadError(
+                f"Character {character_id} is missing condition memory "
+                f"{sorted(missing_memory)!r}"
+            )
+        raw_skills = dict(entry.get("skills", {}))
+        missing_skills = set(definition.skills) - set(raw_skills)
+        if missing_skills:
+            raise MapLoadError(
+                f"Character {character_id} is missing skills "
+                f"{sorted(missing_skills)!r}"
+            )
+        skills = {
+            str(key): SkillState(
+                level=int(value.get("level", 0)) if isinstance(value, dict) else int(value),
+                experience=(
+                    float(value.get("experience", 0.0))
+                    if isinstance(value, dict)
+                    else 0.0
+                ),
+            )
+            for key, value in raw_skills.items()
+        }
+        characters[character_id] = CharacterState(
+            character_id=character_id,
+            type_id=type_id,
+            name=str(entry.get("name", definition.name)),
+            last_sleep_id=sleep_id,
+            conditions=conditions,
+            condition_memory=memory,
+            skills=skills,
+            used_nap_windows=set(entry.get("used_nap_windows", [])),
+        )
+    if controlled_id is not None and controlled_id not in characters:
+        raise MapLoadError(f"Unknown controlled character {controlled_id}")
+    return characters, controlled_id, definitions
+
+
+def _character_payload(characters: dict[int, CharacterState]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": character.character_id,
+            "type": character.type_id,
+            "name": character.name,
+            "last_sleep_id": character.last_sleep_id,
+            "conditions": character.conditions,
+            "condition_memory": character.condition_memory,
+            "skills": {
+                skill_id: {
+                    "level": skill.level,
+                    "experience": skill.experience,
+                }
+                for skill_id, skill in character.skills.items()
+            },
+            "used_nap_windows": sorted(character.used_nap_windows),
+        }
+        for character in sorted(characters.values(), key=lambda value: value.character_id)
+    ]
 
 
 def _required(entry: dict[str, Any], field: str, entry_name: str) -> Any:
@@ -189,7 +415,9 @@ def memory_file_path(
     name: str, directory: Path = DEFAULT_MEMORY_DIR
 ) -> Path:
     cleaned = name.strip()
-    if cleaned.lower().endswith(".memory"):
+    if cleaned.lower().endswith(".jsonc"):
+        cleaned = cleaned[:-6]
+    elif cleaned.lower().endswith(".memory"):
         cleaned = cleaned[:-7]
     if (
         not cleaned
@@ -197,7 +425,7 @@ def memory_file_path(
         or any(character in cleaned for character in '<>:"/\\|?*')
     ):
         raise MapLoadError("Memory name must be a safe filename")
-    return directory / f"{cleaned}.memory"
+    return directory / f"{cleaned}.jsonc"
 
 
 def save_memory_file(
@@ -229,7 +457,11 @@ def load_memory_file(
 ) -> tuple[RoutineStep, ...]:
     path = memory_file_path(name, directory)
     if not path.is_file():
-        raise MapLoadError(f"Memory file does not exist: {path}")
+        legacy_path = path.with_suffix(".memory")
+        if legacy_path.is_file():
+            path = legacy_path
+        else:
+            raise MapLoadError(f"Command-set file does not exist: {path}")
     try:
         payload = loads_jsonc(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -313,6 +545,7 @@ def load_map(
     persistence_path: Path | None = DEFAULT_CURRENT_LEVEL_PATH,
     object_types_path: Path = DEFAULT_OBJECT_TYPES_PATH,
     tile_types_path: Path = DEFAULT_TILE_TYPES_PATH,
+    character_types_path: Path = DEFAULT_CHARACTER_TYPES_PATH,
     day_number: int = 1,
     reset_for_morning: bool = False,
 ) -> MapDefinition:
@@ -323,6 +556,7 @@ def load_map(
             tile_spawn_seed,
             tile_spawn_chances,
             tile_spawn_influences,
+            tile_sprite_overlays,
             till_progress_per_action,
             soil_persistence_gain,
             reverted_till_progress_range,
@@ -388,6 +622,7 @@ def load_map(
             )
             for entry in _required(data, "structures", "map")
         ]
+        boundaries = [_boundary_from_entry(entry) for entry in data.get("boundaries", [])]
         objects = [_object_from_instance(entry, object_types, tile_size) for entry in _required(data, "objects", "map")]
         objects.extend(
             _generate_trees(
@@ -413,6 +648,7 @@ def load_map(
             terrain,
             objects,
         )
+        _apply_boundaries(tile_map, boundaries)
         tile_states = (
             _load_level_tile_states(persistence_path, tile_map)
             if persistence_path is not None
@@ -470,12 +706,49 @@ def load_map(
                 wall_length = structure.width if door.side in {"top", "bottom"} else structure.height
                 if door.width <= 0 or door.offset < 0 or door.offset + door.width > wall_length:
                     raise MapLoadError(f"Door on structure {structure.structure_id!r} falls outside its wall")
+        boundary_ids: set[str] = set()
+        occupied_edges: dict[tuple[int, int, str], str] = {}
+        for boundary in boundaries:
+            if boundary.boundary_id in boundary_ids:
+                raise MapLoadError(f"Map contains duplicate boundary ID {boundary.boundary_id!r}")
+            boundary_ids.add(boundary.boundary_id)
+            if boundary.kind not in {"wall", "fence", "door"}:
+                raise MapLoadError(f"Boundary {boundary.boundary_id!r} has invalid type {boundary.kind!r}")
+            if boundary.edge not in {"north", "west"}:
+                raise MapLoadError(f"Boundary {boundary.boundary_id!r} has invalid edge {boundary.edge!r}")
+            if boundary.kind == "door" and boundary.swing not in {
+                "clockwise",
+                "counterclockwise",
+            }:
+                raise MapLoadError(
+                    f"Door {boundary.boundary_id!r} has invalid swing {boundary.swing!r}"
+                )
+            valid = (
+                boundary.edge == "north"
+                and 0 <= boundary.column < tile_map.columns
+                and 0 <= boundary.row <= tile_map.rows
+            ) or (
+                boundary.edge == "west"
+                and 0 <= boundary.column <= tile_map.columns
+                and 0 <= boundary.row < tile_map.rows
+            )
+            if not valid:
+                raise MapLoadError(f"Boundary {boundary.boundary_id!r} is outside the map")
+            address = (boundary.column, boundary.row, boundary.edge)
+            if address in occupied_edges:
+                raise MapLoadError(
+                    f"Boundaries {occupied_edges[address]!r} and {boundary.boundary_id!r} occupy the same edge"
+                )
+            occupied_edges[address] = boundary.boundary_id
         if len(object_ids) != len(set(object_ids)):
             raise MapLoadError("Map contains duplicate object IDs")
+        characters, controlled_character_id, character_types = _load_characters(
+            data, objects, persistence_path, character_types_path
+        )
         for obj in objects:
             if obj.object_id <= 0:
                 raise MapLoadError("Object IDs must be positive integers")
-            if obj.orientation not in {"N/S", "E/W"}:
+            if obj.orientation not in {"N", "E", "S", "W", "N/S", "E/W"}:
                 raise MapLoadError(f"Object {obj.object_id} has invalid orientation {obj.orientation!r}")
             if not 1 <= obj.quality <= 100:
                 raise MapLoadError(f"Object {obj.object_id} quality must be from 1 to 100")
@@ -508,8 +781,10 @@ def load_map(
             structures=structures,
             objects={obj.object_id: obj for obj in objects},
             tile_map=tile_map,
+            boundaries=boundaries,
             object_types=object_types,
             tile_states=tile_states,
+            tile_sprite_overlays=tile_sprite_overlays,
             cheat_memory=_load_authored_routine(data.get("cheat_memory"), tile_size),
             remembered_routine=(
                 load_remembered_routine(persistence_path, tile_size)
@@ -529,6 +804,9 @@ def load_map(
             soil_persistence_gain=soil_persistence_gain,
             reverted_till_progress_range=reverted_till_progress_range,
             tile_persistence_modifier_range=tile_persistence_modifier_range,
+            characters=characters,
+            controlled_character_id=controlled_character_id,
+            character_types=character_types,
         )
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, MapLoadError):
@@ -591,6 +869,8 @@ def initialize_current_level_from_map(
             "level_map": map_path.name,
             "remembered_routine": existing_memory,
             "build_memories": existing_build_memories,
+            "controlled_character_id": map_data.get("controlled_character_id"),
+            "characters": map_data.get("characters", []),
             "objects": entries,
             "tiles": [],
         }
@@ -647,6 +927,13 @@ def sync_current_level_from_map(
             "level_map": map_path.name,
             "remembered_routine": current_data.get("remembered_routine", []),
             "build_memories": current_data.get("build_memories", []),
+            "quest_state": current_data.get("quest_state", {}),
+            "controlled_character_id": current_data.get(
+                "controlled_character_id", map_data.get("controlled_character_id")
+            ),
+            "characters": current_data.get(
+                "characters", map_data.get("characters", [])
+            ),
             "objects": list(current_by_id.values()),
             "tiles": current_data.get("tiles", []),
         }
@@ -741,6 +1028,10 @@ def _load_object_type(entry: dict[str, Any], defaults: dict[str, Any]) -> Object
         variants=variants,
         default_variant=default_variant,
         state_fields=tuple(str(field) for field in inherited.get("state_fields", [])),
+        state_defaults={
+            str(field): value
+            for field, value in inherited.get("state_defaults", {}).items()
+        },
         growth=dict(inherited.get("growth", {})),
     )
 
@@ -783,6 +1074,18 @@ def _load_object_form(form_id: str, entry: dict[str, Any], type_id: str) -> Obje
         raise MapLoadError(
             f"Form {form_id!r} on object type {type_id!r} has an invalid footprint"
         )
+    condition_recovery = {
+        str(condition_id): float(value)
+        for condition_id, value in entry.get("condition_recovery", {}).items()
+    }
+    unknown_conditions = set(condition_recovery) - {
+        "trauma", "hunger", "thirst", "fatigue"
+    }
+    if unknown_conditions:
+        raise MapLoadError(
+            f"Object type {type_id!r} has unknown condition recovery "
+            f"{sorted(unknown_conditions)!r}"
+        )
     return ObjectForm(
         form_id=form_id,
         # A name dictionary belongs to the object/variant layer. Forms only
@@ -818,13 +1121,68 @@ def _load_object_form(form_id: str, entry: dict[str, Any], type_id: str) -> Obje
             for resource, value in entry.get("capacity", {}).items()
         },
         nutrition=max(0, int(entry.get("nutrition", 0))),
+        condition_recovery=condition_recovery,
         build_duration_seconds=float(entry.get("build_duration_seconds", 0.0)),
         persistence={
             str(policy_id): _load_persistence_policy(policy, type_id, str(policy_id))
             for policy_id, policy in entry.get("persistence", {}).items()
         },
         states=tuple(str(state_id) for state_id in entry.get("states", [])),
+        sprite_overlays=_load_sprite_overlays(
+            entry.get("sprite_overlays", []), f"object type {type_id!r}/{form_id!r}"
+        ),
     )
+
+
+def _load_sprite_overlays(
+    entries: object, owner: str
+) -> tuple[SpriteOverlay, ...]:
+    if not isinstance(entries, list):
+        raise MapLoadError(f"sprite_overlays on {owner} must be an array")
+    overlays: list[SpriteOverlay] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise MapLoadError(f"Each sprite overlay on {owner} must be an object")
+        overlay_id = str(_required(entry, "id", f"sprite overlay on {owner}"))
+        state_field = str(
+            _required(entry, "state_field", f"sprite overlay {overlay_id!r}")
+        )
+        if not overlay_id.replace("_", "").replace("-", "").isalnum():
+            raise MapLoadError(f"Invalid sprite overlay id {overlay_id!r} on {owner}")
+        if overlay_id in seen:
+            raise MapLoadError(f"Duplicate sprite overlay {overlay_id!r} on {owner}")
+        seen.add(overlay_id)
+        value_range = entry.get("value_range", [0.0, None])
+        alpha_range = entry.get("alpha_range", [0, 255])
+        if (
+            not isinstance(value_range, list)
+            or len(value_range) != 2
+            or not isinstance(alpha_range, list)
+            or len(alpha_range) != 2
+        ):
+            raise MapLoadError(f"Invalid ranges for sprite overlay {overlay_id!r}")
+        alpha_min, alpha_max = int(alpha_range[0]), int(alpha_range[1])
+        if not 0 <= alpha_min <= 255 or not 0 <= alpha_max <= 255:
+            raise MapLoadError(f"Invalid alpha range for sprite overlay {overlay_id!r}")
+        overlays.append(
+            SpriteOverlay(
+                overlay_id=overlay_id,
+                state_field=state_field,
+                value_min=float(value_range[0]),
+                value_max=(
+                    float(value_range[1]) if value_range[1] is not None else None
+                ),
+                capacity_resource=(
+                    str(entry["capacity_resource"])
+                    if entry.get("capacity_resource") is not None
+                    else None
+                ),
+                alpha_min=alpha_min,
+                alpha_max=alpha_max,
+            )
+        )
+    return tuple(overlays)
 
 
 def _load_persistence_policy(
@@ -896,6 +1254,7 @@ def load_tile_spawn_rules(
     int,
     dict[TileKind, dict[str, float]],
     dict[TileKind, tuple[tuple[str, float, int, float], ...]],
+    dict[str, tuple[SpriteOverlay, ...]],
     float,
     float,
     tuple[float, float],
@@ -905,6 +1264,7 @@ def load_tile_spawn_rules(
         data = loads_jsonc(path.read_text(encoding="utf-8"))
         rules: dict[TileKind, dict[str, float]] = {}
         influences: dict[TileKind, tuple[tuple[str, float, int, float], ...]] = {}
+        sprite_overlays: dict[str, tuple[SpriteOverlay, ...]] = {}
         for kind in TileKind:
             entry = _required(_required(data, "tile_types", "tile catalog"), kind.value, "tile type")
             chances = {str(type_id): float(chance) for type_id, chance in entry.get("spawn_chances", {}).items()}
@@ -913,6 +1273,9 @@ def load_tile_spawn_rules(
                 if not 0 <= chance <= 1:
                     raise MapLoadError(f"Invalid spawn chance for {type_id!r} on {kind.value}")
             rules[kind] = chances
+            sprite_overlays[kind.value] = _load_sprite_overlays(
+                entry.get("sprite_overlays", []), f"tile type {kind.value!r}"
+            )
             influences[kind] = tuple(
                 (
                     str(_required(influence, "type", "tile spawn influence")),
@@ -967,6 +1330,7 @@ def load_tile_spawn_rules(
             int(data.get("seed", 0)),
             rules,
             influences,
+            sprite_overlays,
             permanent_chance,
             persistence_gain,
             (float(reverted_range[0]), float(reverted_range[1])),
@@ -1004,7 +1368,7 @@ def _object_from_instance(
     )
     orientation = _normalize_orientation(str(live.get("orientation", entry.get("orientation", "E/W"))))
     footprint_width, footprint_height = form.footprint
-    if orientation == "N/S":
+    if orientation in {"N", "S"}:
         footprint_width, footprint_height = footprint_height, footprint_width
     obj = WorldObject(
         object_id=int(_required(entry, "id", "object instance")),
@@ -1015,7 +1379,7 @@ def _object_from_instance(
         width=footprint_width * tile_size,
         height=footprint_height * tile_size,
         active=bool(live.get("active", True)),
-        state=dict(live.get("state", {})),
+        state={**definition.state_defaults, **dict(live.get("state", {}))},
         blocks_movement=form.blocks_movement,
         blocks_vision=form.blocks_vision,
         mobility=form.mobility,
@@ -1025,6 +1389,7 @@ def _object_from_instance(
         interactions={action: dict(details) for action, details in form.interactions.items()},
         capacity=form.capacity_for(quality),
         nutrition=form.nutrition,
+        condition_recovery=dict(form.condition_recovery),
         type_id=type_id,
         orientation=orientation,
         quality=quality,
@@ -1037,7 +1402,10 @@ def _object_from_instance(
 
 
 def _normalize_orientation(value: str) -> str:
-    legacy = {"north": "N/S", "south": "N/S", "east": "E/W", "west": "E/W"}
+    legacy = {
+        "n/s": "N", "e/w": "E", "north": "N", "east": "E",
+        "south": "S", "west": "W",
+    }
     return legacy.get(value.lower(), value.upper())
 
 
@@ -1203,6 +1571,9 @@ def save_persistent_objects(
     tile_states: dict[tuple[int, int], LevelTileState] | None = None,
     remembered_routine: list[RoutineStep] | tuple[RoutineStep, ...] | None = None,
     build_memories: dict[str, BuildMemory] | None = None,
+    quest_state: dict[str, object] | None = None,
+    characters: dict[int, CharacterState] | None = None,
+    controlled_character_id: int | None = None,
 ) -> None:
     entries = []
     for obj in objects.values():
@@ -1284,6 +1655,21 @@ def save_persistent_objects(
             _build_memory_payload(build_memories)
             if build_memories is not None
             else existing_data.get("build_memories", [])
+        ),
+        "quest_state": (
+            quest_state
+            if quest_state is not None
+            else existing_data.get("quest_state", {})
+        ),
+        "controlled_character_id": (
+            controlled_character_id
+            if controlled_character_id is not None
+            else existing_data.get("controlled_character_id")
+        ),
+        "characters": (
+            _character_payload(characters)
+            if characters is not None
+            else existing_data.get("characters", [])
         ),
         "objects": entries,
         "tiles": existing_tiles,
@@ -1386,6 +1772,7 @@ def _generate_daily_objects(
                         blocks_vision=form.blocks_vision,
                         mobility=form.mobility,
                         traits=form.traits,
+                        state=dict(definition.state_defaults),
                         persistent=False,
                         descriptions=dict(form.descriptions),
                         interactions={
@@ -1394,6 +1781,7 @@ def _generate_daily_objects(
                         },
                         capacity=form.capacity_for(100),
                         nutrition=form.nutrition,
+                        condition_recovery=dict(form.condition_recovery),
                         type_id=type_id,
                         quality=100,
                         daily_spawned=True,
@@ -1520,6 +1908,7 @@ def _generate_trees(
                 blocks_vision=tree_form.blocks_vision,
                 mobility=tree_form.mobility,
                 traits=tree_form.traits,
+                state=dict(object_types["tree"].state_defaults),
                 descriptions=dict(tree_form.descriptions),
                 interactions={
                     action: dict(details)
@@ -1700,6 +2089,51 @@ def _apply_object_occupancy(tile_map: TileMap, objects: list[WorldObject]) -> No
                         tile_map.set_edge_passable(column, row, edge, False)
 
 
+def _apply_boundaries(tile_map: TileMap, boundaries: list[BoundaryObject]) -> None:
+    for boundary in boundaries:
+        try:
+            edge = TileEdge(boundary.edge)
+        except ValueError as exc:
+            raise MapLoadError(
+                f"Boundary {boundary.boundary_id!r} has invalid edge {boundary.edge!r}"
+            ) from exc
+        column, row = boundary.column, boundary.row
+        # South/east map-border canonical edges have no tile on their lower/right side.
+        if edge is TileEdge.NORTH and row == tile_map.rows:
+            row -= 1
+            edge = TileEdge.SOUTH
+        elif edge is TileEdge.WEST and column == tile_map.columns:
+            column -= 1
+            edge = TileEdge.EAST
+        # Unlocked doors are route-plannable even while visually closed; the
+        # character opens them automatically when reaching the crossing.
+        passable = boundary.kind == "door" and not boundary.locked
+        tile_map.set_edge_passable(column, row, edge, passable)
+
+
+def _boundary_from_entry(entry: dict[str, Any]) -> BoundaryObject:
+    column = int(_required(entry, "x", "boundary"))
+    row = int(_required(entry, "y", "boundary"))
+    edge = str(_required(entry, "edge", "boundary")).lower()
+    if edge == "east":
+        column += 1
+        edge = "west"
+    elif edge == "south":
+        row += 1
+        edge = "north"
+    return BoundaryObject(
+        boundary_id=str(_required(entry, "id", "boundary")),
+        kind=str(_required(entry, "type", "boundary")),
+        column=column,
+        row=row,
+        edge=edge,
+        open=bool(entry.get("open", False)),
+        locked=bool(entry.get("locked", False)),
+        swing=str(entry.get("swing", "counterclockwise")).lower(),
+        blocks_vision=bool(entry.get("blocks_vision", entry.get("type") == "wall")),
+    )
+
+
 def rebuild_tile_map(map_definition: MapDefinition) -> None:
     """Rebuild object occupancy while retaining mutable terrain changes."""
     previous_kinds = [tile.kind for tile in map_definition.tile_map.tiles]
@@ -1711,6 +2145,7 @@ def rebuild_tile_map(map_definition: MapDefinition) -> None:
         map_definition.terrain,
         list(map_definition.objects.values()),
     )
+    _apply_boundaries(rebuilt, map_definition.boundaries)
     for previous_kind, tile in zip(previous_kinds, rebuilt.tiles):
         if previous_kind is TileKind.SOIL and tile.kind is TileKind.GRASSLAND:
             tile.kind = TileKind.SOIL
@@ -1740,13 +2175,9 @@ def _apply_room_edges(tile_map: TileMap, room: MapStructure) -> None:
     for column in range(left, right + 1):
         tile_map.set_edge_passable(column, top, TileEdge.NORTH, False)
         tile_map.set_edge_passable(column, bottom, TileEdge.SOUTH, False)
-        _set_structural_wall(tile_map, column, top, TileEdge.NORTH, True)
-        _set_structural_wall(tile_map, column, bottom, TileEdge.SOUTH, True)
     for row in range(top, bottom + 1):
         tile_map.set_edge_passable(left, row, TileEdge.WEST, False)
         tile_map.set_edge_passable(right, row, TileEdge.EAST, False)
-        _set_structural_wall(tile_map, left, row, TileEdge.WEST, True)
-        _set_structural_wall(tile_map, right, row, TileEdge.EAST, True)
     for door in room.doors:
         if door.side in {"top", "bottom"}:
             first = (room.x + door.offset) // size
@@ -1755,7 +2186,6 @@ def _apply_room_edges(tile_map: TileMap, room: MapStructure) -> None:
             edge = TileEdge.NORTH if door.side == "top" else TileEdge.SOUTH
             for column in range(first, last + 1):
                 tile_map.set_edge_passable(column, row, edge, True)
-                _set_structural_wall(tile_map, column, row, edge, False)
         else:
             first = (room.y + door.offset) // size
             last = (room.y + door.offset + door.width) // size - 1
@@ -1763,25 +2193,6 @@ def _apply_room_edges(tile_map: TileMap, room: MapStructure) -> None:
             edge = TileEdge.WEST if door.side == "left" else TileEdge.EAST
             for row in range(first, last + 1):
                 tile_map.set_edge_passable(column, row, edge, True)
-                _set_structural_wall(tile_map, column, row, edge, False)
-
-
-def _set_structural_wall(
-    tile_map: TileMap,
-    column: int,
-    row: int,
-    edge: TileEdge,
-    present: bool,
-) -> None:
-    """Track authored room walls separately from movement-blocking edges."""
-    tile = tile_map.tile_at(column, row)
-    if tile is None:
-        return
-    marker = f"wall:{edge.name.lower()}"
-    if present and marker not in tile.properties:
-        tile.properties.append(marker)
-    elif not present and marker in tile.properties:
-        tile.properties.remove(marker)
 
 
 def door_opening(structure: MapStructure, door: MapDoor) -> tuple[str, int, int, int]:
